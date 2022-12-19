@@ -174,7 +174,6 @@ bus_name_cmp(const struct rte_bus *bus, const void *name)
 	return strncmp(bus->name, name, strlen(bus->name));
 }
 
-__rte_experimental
 int
 rte_devargs_parse(struct rte_devargs *da, const char *dev)
 {
@@ -230,7 +229,6 @@ rte_devargs_parse(struct rte_devargs *da, const char *dev)
 	return 0;
 }
 
-__rte_experimental
 int
 rte_devargs_parsef(struct rte_devargs *da, const char *format, ...)
 {
@@ -262,7 +260,7 @@ rte_devargs_parsef(struct rte_devargs *da, const char *format, ...)
 	return ret;
 }
 
-int __rte_experimental
+int
 rte_devargs_insert(struct rte_devargs **da)
 {
 	struct rte_devargs *listed_da;
@@ -298,8 +296,7 @@ rte_devargs_insert(struct rte_devargs **da)
 	return 0;
 }
 
-/* store a whitelist parameter for later parsing */
-__rte_experimental
+/* store in allowed list parameter for later parsing */
 int
 rte_devargs_add(enum rte_devtype devtype, const char *devargs_str)
 {
@@ -316,13 +313,13 @@ rte_devargs_add(enum rte_devtype devtype, const char *devargs_str)
 		goto fail;
 	devargs->type = devtype;
 	bus = devargs->bus;
-	if (devargs->type == RTE_DEVTYPE_BLACKLISTED_PCI)
-		devargs->policy = RTE_DEV_BLACKLISTED;
+	if (devargs->type == RTE_DEVTYPE_BLOCKED)
+		devargs->policy = RTE_DEV_BLOCKED;
 	if (bus->conf.scan_mode == RTE_BUS_SCAN_UNDEFINED) {
-		if (devargs->policy == RTE_DEV_WHITELISTED)
-			bus->conf.scan_mode = RTE_BUS_SCAN_WHITELIST;
-		else if (devargs->policy == RTE_DEV_BLACKLISTED)
-			bus->conf.scan_mode = RTE_BUS_SCAN_BLACKLIST;
+		if (devargs->policy == RTE_DEV_ALLOWED)
+			bus->conf.scan_mode = RTE_BUS_SCAN_ALLOWLIST;
+		else if (devargs->policy == RTE_DEV_BLOCKED)
+			bus->conf.scan_mode = RTE_BUS_SCAN_BLOCKLIST;
 	}
 	TAILQ_INSERT_TAIL(&devargs_list, devargs, next);
 	return 0;
@@ -336,7 +333,7 @@ fail:
 	return -1;
 }
 
-int __rte_experimental
+int
 rte_devargs_remove(struct rte_devargs *devargs)
 {
 	struct rte_devargs *d;
@@ -358,7 +355,6 @@ rte_devargs_remove(struct rte_devargs *devargs)
 }
 
 /* count the number of devices of a specified type */
-__rte_experimental
 unsigned int
 rte_devargs_type_count(enum rte_devtype devtype)
 {
@@ -374,7 +370,6 @@ rte_devargs_type_count(enum rte_devtype devtype)
 }
 
 /* dump the user devices on the console */
-__rte_experimental
 void
 rte_devargs_dump(FILE *f)
 {
@@ -389,7 +384,6 @@ rte_devargs_dump(FILE *f)
 }
 
 /* bus-aware rte_devargs iterator. */
-__rte_experimental
 struct rte_devargs *
 rte_devargs_next(const char *busname, const struct rte_devargs *start)
 {

@@ -112,6 +112,7 @@ struct igb_rx_queue {
 	uint8_t             drop_en;  /**< If not 0, set SRRCTL.Drop_En. */
 	uint32_t            flags;      /**< RX flags. */
 	uint64_t	    offloads;   /**< offloads of DEV_RX_OFFLOAD_* */
+	const struct rte_memzone *mz;
 };
 
 /**
@@ -150,7 +151,7 @@ union igb_tx_offload {
 	(TX_MACIP_LEN_CMP_MASK | TX_TCP_LEN_CMP_MASK | TX_TSO_MSS_CMP_MASK)
 
 /**
- * Strucutre to check if new context need be built
+ * Structure to check if new context need be built
  */
 struct igb_advctx_info {
 	uint64_t flags;           /**< ol_flags related to context build. */
@@ -186,6 +187,7 @@ struct igb_tx_queue {
 	struct igb_advctx_info ctx_cache[IGB_CTX_NUM];
 	/**< Hardware context history.*/
 	uint64_t	       offloads; /**< offloads of DEV_TX_OFFLOAD_* */
+	const struct rte_memzone *mz;
 };
 
 #if 1
@@ -289,17 +291,20 @@ igbe_set_xmit_ctx(struct igb_tx_queue* txq,
 		case PKT_TX_UDP_CKSUM:
 			type_tucmd_mlhl |= E1000_ADVTXD_TUCMD_L4T_UDP |
 				E1000_ADVTXD_DTYP_CTXT | E1000_ADVTXD_DCMD_DEXT;
-			mss_l4len_idx |= sizeof(struct udp_hdr) << E1000_ADVTXD_L4LEN_SHIFT;
+			mss_l4len_idx |= sizeof(struct rte_udp_hdr)
+				<< E1000_ADVTXD_L4LEN_SHIFT;
 			break;
 		case PKT_TX_TCP_CKSUM:
 			type_tucmd_mlhl |= E1000_ADVTXD_TUCMD_L4T_TCP |
 				E1000_ADVTXD_DTYP_CTXT | E1000_ADVTXD_DCMD_DEXT;
-			mss_l4len_idx |= sizeof(struct tcp_hdr) << E1000_ADVTXD_L4LEN_SHIFT;
+			mss_l4len_idx |= sizeof(struct rte_tcp_hdr)
+				<< E1000_ADVTXD_L4LEN_SHIFT;
 			break;
 		case PKT_TX_SCTP_CKSUM:
 			type_tucmd_mlhl |= E1000_ADVTXD_TUCMD_L4T_SCTP |
 				E1000_ADVTXD_DTYP_CTXT | E1000_ADVTXD_DCMD_DEXT;
-			mss_l4len_idx |= sizeof(struct sctp_hdr) << E1000_ADVTXD_L4LEN_SHIFT;
+			mss_l4len_idx |= sizeof(struct rte_sctp_hdr)
+				<< E1000_ADVTXD_L4LEN_SHIFT;
 			break;
 		default:
 			type_tucmd_mlhl |= E1000_ADVTXD_TUCMD_L4T_RSV |
@@ -317,7 +322,7 @@ igbe_set_xmit_ctx(struct igb_tx_queue* txq,
 	vlan_macip_lens = (uint32_t)tx_offload.data;
 	ctx_txd->vlan_macip_lens = rte_cpu_to_le_32(vlan_macip_lens);
 	ctx_txd->mss_l4len_idx = rte_cpu_to_le_32(mss_l4len_idx);
-	ctx_txd->seqnum_seed = 0;
+	ctx_txd->u.seqnum_seed = 0;
 }
 
 /*
@@ -963,7 +968,7 @@ eth_igb_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 	 * register.
 	 * Update the RDT with the value of the last processed RX descriptor
 	 * minus 1, to guarantee that the RDT register is never equal to the
-	 * RDH register, which creates a "full" ring situtation from the
+	 * RDH register, which creates a "full" ring situation from the
 	 * hardware point of view...
 	 */
 	nb_hold = (uint16_t) (nb_hold + rxq->nb_rx_hold);
@@ -1147,17 +1152,17 @@ eth_igb_recv_scattered_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 		 */
 		rxm->next = NULL;
 		if (unlikely(rxq->crc_len > 0)) {
-			first_seg->pkt_len -= ETHER_CRC_LEN;
-			if (data_len <= ETHER_CRC_LEN) {
+			first_seg->pkt_len -= RTE_ETHER_CRC_LEN;
+			if (data_len <= RTE_ETHER_CRC_LEN) {
 				rte_pktmbuf_free_seg(rxm);
 				first_seg->nb_segs--;
 				last_seg->data_len = (uint16_t)
 					(last_seg->data_len -
-					 (ETHER_CRC_LEN - data_len));
+					 (RTE_ETHER_CRC_LEN - data_len));
 				last_seg->next = NULL;
 			} else
-				rxm->data_len =
-					(uint16_t) (data_len - ETHER_CRC_LEN);
+				rxm->data_len = (uint16_t)
+					(data_len - RTE_ETHER_CRC_LEN);
 		}
 
 		/*
@@ -1225,7 +1230,7 @@ eth_igb_recv_scattered_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 	 * register.
 	 * Update the RDT with the value of the last processed RX descriptor
 	 * minus 1, to guarantee that the RDT register is never equal to the
-	 * RDH register, which creates a "full" ring situtation from the
+	 * RDH register, which creates a "full" ring situation from the
 	 * hardware point of view...
 	 */
 	nb_hold = (uint16_t) (nb_hold + rxq->nb_rx_hold);
@@ -1248,7 +1253,7 @@ eth_igb_recv_scattered_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
  * Maximum number of Ring Descriptors.
  *
  * Since RDLEN/TDLEN should be multiple of 128bytes, the number of ring
- * desscriptors should meet the following condition:
+ * descriptors should meet the following condition:
  *      (num_ring_desc * sizeof(struct e1000_rx/tx_desc)) % 128 == 0
  */
 
@@ -1273,6 +1278,7 @@ igb_tx_queue_release(struct igb_tx_queue *txq)
 	if (txq != NULL) {
 		igb_tx_queue_release_mbufs(txq);
 		rte_free(txq->sw_ring);
+		rte_memzone_free(txq->mz);
 		rte_free(txq);
 	}
 }
@@ -1292,113 +1298,107 @@ igb_tx_done_cleanup(struct igb_tx_queue *txq, uint32_t free_cnt)
 	uint16_t tx_id;    /* Current segment being processed. */
 	uint16_t tx_last;  /* Last segment in the current packet. */
 	uint16_t tx_next;  /* First segment of the next packet. */
-	int count;
+	int count = 0;
 
-	if (txq != NULL) {
-		count = 0;
-		sw_ring = txq->sw_ring;
-		txr = txq->tx_ring;
+	if (!txq)
+		return -ENODEV;
 
-		/*
-		 * tx_tail is the last sent packet on the sw_ring. Goto the end
-		 * of that packet (the last segment in the packet chain) and
-		 * then the next segment will be the start of the oldest segment
-		 * in the sw_ring. This is the first packet that will be
-		 * attempted to be freed.
-		 */
+	sw_ring = txq->sw_ring;
+	txr = txq->tx_ring;
 
-		/* Get last segment in most recently added packet. */
-		tx_first = sw_ring[txq->tx_tail].last_id;
+	/* tx_tail is the last sent packet on the sw_ring. Goto the end
+	 * of that packet (the last segment in the packet chain) and
+	 * then the next segment will be the start of the oldest segment
+	 * in the sw_ring. This is the first packet that will be
+	 * attempted to be freed.
+	 */
 
-		/* Get the next segment, which is the oldest segment in ring. */
-		tx_first = sw_ring[tx_first].next_id;
+	/* Get last segment in most recently added packet. */
+	tx_first = sw_ring[txq->tx_tail].last_id;
 
-		/* Set the current index to the first. */
-		tx_id = tx_first;
+	/* Get the next segment, which is the oldest segment in ring. */
+	tx_first = sw_ring[tx_first].next_id;
 
-		/*
-		 * Loop through each packet. For each packet, verify that an
-		 * mbuf exists and that the last segment is free. If so, free
-		 * it and move on.
-		 */
-		while (1) {
-			tx_last = sw_ring[tx_id].last_id;
+	/* Set the current index to the first. */
+	tx_id = tx_first;
 
-			if (sw_ring[tx_last].mbuf) {
-				if (txr[tx_last].wb.status &
-						E1000_TXD_STAT_DD) {
-					/*
-					 * Increment the number of packets
-					 * freed.
-					 */
-					count++;
+	/* Loop through each packet. For each packet, verify that an
+	 * mbuf exists and that the last segment is free. If so, free
+	 * it and move on.
+	 */
+	while (1) {
+		tx_last = sw_ring[tx_id].last_id;
 
-					/* Get the start of the next packet. */
-					tx_next = sw_ring[tx_last].next_id;
-
-					/*
-					 * Loop through all segments in a
-					 * packet.
-					 */
-					do {
-						rte_pktmbuf_free_seg(sw_ring[tx_id].mbuf);
-						sw_ring[tx_id].mbuf = NULL;
-						sw_ring[tx_id].last_id = tx_id;
-
-						/* Move to next segemnt. */
-						tx_id = sw_ring[tx_id].next_id;
-
-					} while (tx_id != tx_next);
-
-					if (unlikely(count == (int)free_cnt))
-						break;
-				} else
-					/*
-					 * mbuf still in use, nothing left to
-					 * free.
-					 */
-					break;
-			} else {
-				/*
-				 * There are multiple reasons to be here:
-				 * 1) All the packets on the ring have been
-				 *    freed - tx_id is equal to tx_first
-				 *    and some packets have been freed.
-				 *    - Done, exit
-				 * 2) Interfaces has not sent a rings worth of
-				 *    packets yet, so the segment after tail is
-				 *    still empty. Or a previous call to this
-				 *    function freed some of the segments but
-				 *    not all so there is a hole in the list.
-				 *    Hopefully this is a rare case.
-				 *    - Walk the list and find the next mbuf. If
-				 *      there isn't one, then done.
+		if (sw_ring[tx_last].mbuf) {
+			if (txr[tx_last].wb.status &
+			    E1000_TXD_STAT_DD) {
+				/* Increment the number of packets
+				 * freed.
 				 */
-				if (likely((tx_id == tx_first) && (count != 0)))
-					break;
+				count++;
 
-				/*
-				 * Walk the list and find the next mbuf, if any.
+				/* Get the start of the next packet. */
+				tx_next = sw_ring[tx_last].next_id;
+
+				/* Loop through all segments in a
+				 * packet.
 				 */
 				do {
-					/* Move to next segemnt. */
+					if (sw_ring[tx_id].mbuf) {
+						rte_pktmbuf_free_seg(
+							sw_ring[tx_id].mbuf);
+						sw_ring[tx_id].mbuf = NULL;
+						sw_ring[tx_id].last_id = tx_id;
+					}
+
+					/* Move to next segment. */
 					tx_id = sw_ring[tx_id].next_id;
 
-					if (sw_ring[tx_id].mbuf)
-						break;
+				} while (tx_id != tx_next);
 
-				} while (tx_id != tx_first);
-
-				/*
-				 * Determine why previous loop bailed. If there
-				 * is not an mbuf, done.
-				 */
-				if (sw_ring[tx_id].mbuf == NULL)
+				if (unlikely(count == (int)free_cnt))
 					break;
+			} else {
+				/* mbuf still in use, nothing left to
+				 * free.
+				 */
+				break;
 			}
+		} else {
+			/* There are multiple reasons to be here:
+			 * 1) All the packets on the ring have been
+			 *    freed - tx_id is equal to tx_first
+			 *    and some packets have been freed.
+			 *    - Done, exit
+			 * 2) Interfaces has not sent a rings worth of
+			 *    packets yet, so the segment after tail is
+			 *    still empty. Or a previous call to this
+			 *    function freed some of the segments but
+			 *    not all so there is a hole in the list.
+			 *    Hopefully this is a rare case.
+			 *    - Walk the list and find the next mbuf. If
+			 *      there isn't one, then done.
+			 */
+			if (likely(tx_id == tx_first && count != 0))
+				break;
+
+			/* Walk the list and find the next mbuf, if any. */
+			do {
+				/* Move to next segment. */
+				tx_id = sw_ring[tx_id].next_id;
+
+				if (sw_ring[tx_id].mbuf)
+					break;
+
+			} while (tx_id != tx_first);
+
+			/* Determine why previous loop bailed. If there
+			 * is not an mbuf, done.
+			 */
+			if (!sw_ring[tx_id].mbuf)
+				break;
 		}
-	} else
-		count = -ENODEV;
+	}
 
 	return count;
 }
@@ -1548,6 +1548,7 @@ eth_igb_tx_queue_setup(struct rte_eth_dev *dev,
 		return -ENOMEM;
 	}
 
+	txq->mz = tz;
 	txq->nb_tx_desc = nb_desc;
 	txq->pthresh = tx_conf->tx_thresh.pthresh;
 	txq->hthresh = tx_conf->tx_thresh.hthresh;
@@ -1604,6 +1605,7 @@ igb_rx_queue_release(struct igb_rx_queue *rxq)
 	if (rxq != NULL) {
 		igb_rx_queue_release_mbufs(rxq);
 		rte_free(rxq->sw_ring);
+		rte_memzone_free(rxq->mz);
 		rte_free(rxq);
 	}
 }
@@ -1634,8 +1636,10 @@ uint64_t
 igb_get_rx_port_offloads_capa(struct rte_eth_dev *dev)
 {
 	uint64_t rx_offload_capa;
+	struct e1000_hw *hw;
 
-	RTE_SET_USED(dev);
+	hw = E1000_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+
 	rx_offload_capa = DEV_RX_OFFLOAD_VLAN_STRIP  |
 			  DEV_RX_OFFLOAD_VLAN_FILTER |
 			  DEV_RX_OFFLOAD_IPV4_CKSUM  |
@@ -1643,7 +1647,13 @@ igb_get_rx_port_offloads_capa(struct rte_eth_dev *dev)
 			  DEV_RX_OFFLOAD_TCP_CKSUM   |
 			  DEV_RX_OFFLOAD_JUMBO_FRAME |
 			  DEV_RX_OFFLOAD_KEEP_CRC    |
-			  DEV_RX_OFFLOAD_SCATTER;
+			  DEV_RX_OFFLOAD_SCATTER     |
+			  DEV_RX_OFFLOAD_RSS_HASH;
+
+	if (hw->mac.type == e1000_i350 ||
+	    hw->mac.type == e1000_i210 ||
+	    hw->mac.type == e1000_i211)
+		rx_offload_capa |= DEV_RX_OFFLOAD_VLAN_EXTEND;
 
 	return rx_offload_capa;
 }
@@ -1725,7 +1735,7 @@ eth_igb_rx_queue_setup(struct rte_eth_dev *dev,
 		queue_idx : RTE_ETH_DEV_SRIOV(dev).def_pool_q_idx + queue_idx);
 	rxq->port_id = dev->data->port_id;
 	if (dev->data->dev_conf.rxmode.offloads & DEV_RX_OFFLOAD_KEEP_CRC)
-		rxq->crc_len = ETHER_CRC_LEN;
+		rxq->crc_len = RTE_ETHER_CRC_LEN;
 	else
 		rxq->crc_len = 0;
 
@@ -1741,6 +1751,8 @@ eth_igb_rx_queue_setup(struct rte_eth_dev *dev,
 		igb_rx_queue_release(rxq);
 		return -ENOMEM;
 	}
+
+	rxq->mz = rz;
 	rxq->rdt_reg_addr = E1000_PCI_REG_ADDR(hw, E1000_RDT(rxq->reg_idx));
 	rxq->rdh_reg_addr = E1000_PCI_REG_ADDR(hw, E1000_RDH(rxq->reg_idx));
 	rxq->rx_ring_phys_addr = rz->iova;
@@ -2153,7 +2165,7 @@ igb_vmdq_rx_hw_configure(struct rte_eth_dev *dev)
 
 	igb_rss_disable(dev);
 
-	/* RCTL: eanble VLAN filter */
+	/* RCTL: enable VLAN filter */
 	rctl = E1000_READ_REG(hw, E1000_RCTL);
 	rctl |= E1000_RCTL_VFE;
 	E1000_WRITE_REG(hw, E1000_RCTL, rctl);
@@ -2336,15 +2348,18 @@ eth_igb_rx_init(struct rte_eth_dev *dev)
 	 * Configure support of jumbo frames, if any.
 	 */
 	if (dev->data->dev_conf.rxmode.offloads & DEV_RX_OFFLOAD_JUMBO_FRAME) {
+		uint32_t max_len = dev->data->dev_conf.rxmode.max_rx_pkt_len;
+
 		rctl |= E1000_RCTL_LPE;
 
 		/*
 		 * Set maximum packet length by default, and might be updated
 		 * together with enabling/disabling dual VLAN.
 		 */
-		E1000_WRITE_REG(hw, E1000_RLPML,
-			dev->data->dev_conf.rxmode.max_rx_pkt_len +
-						VLAN_TAG_SIZE);
+		if (rxmode->offloads & DEV_RX_OFFLOAD_VLAN_EXTEND)
+			max_len += VLAN_TAG_SIZE;
+
+		E1000_WRITE_REG(hw, E1000_RLPML, max_len);
 	} else
 		rctl &= ~E1000_RCTL_LPE;
 
@@ -2378,7 +2393,7 @@ eth_igb_rx_init(struct rte_eth_dev *dev)
 		 *  call to configure
 		 */
 		if (dev->data->dev_conf.rxmode.offloads & DEV_RX_OFFLOAD_KEEP_CRC)
-			rxq->crc_len = ETHER_CRC_LEN;
+			rxq->crc_len = RTE_ETHER_CRC_LEN;
 		else
 			rxq->crc_len = 0;
 

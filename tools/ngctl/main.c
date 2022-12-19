@@ -148,13 +148,13 @@ int csock = -1, dsock = -1;
 void
 __attribute__((destructor)) close_ng_socks()
 {
-        if (csock >= 0) {
-                ng_close(csock);
-        }
+	if (csock >= 0) {
+		ng_close(csock);
+	}
 
-        if (dsock >= 0) {
-                ng_close(dsock);
-        }
+	if (dsock >= 0) {
+		ng_close(dsock);
+	}
 }
 #endif
 
@@ -235,6 +235,9 @@ main(int ac, char *av[])
 		rtn = EX_OSERR;
 		break;
 	}
+#ifdef FSTACK
+	ff_ipc_exit();
+#endif
 	return (rtn);
 }
 
@@ -720,6 +723,8 @@ Usage(const char *msg)
 		"usage: ngctl [-d] [-f file] [-n name] [command ...]\n");
 #else
 		"usage: ngctl -p <f-stack proc_id>  [-d] [-f file] [-n name] [command ...]\n");
+
+	ff_ipc_exit();
 #endif
 	exit(EX_USAGE);
 }

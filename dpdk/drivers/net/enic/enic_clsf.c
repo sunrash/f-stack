@@ -11,7 +11,6 @@
 #include <rte_tcp.h>
 #include <rte_udp.h>
 #include <rte_sctp.h>
-#include <rte_eth_ctrl.h>
 
 #include "enic_compat.h"
 #include "enic.h"
@@ -43,20 +42,9 @@ static void copy_fltr_v2(struct filter_v2 *fltr,
 		const struct rte_eth_fdir_input *input,
 		const struct rte_eth_fdir_masks *masks);
 
-void enic_fdir_stats_get(struct enic *enic, struct rte_eth_fdir_stats *stats)
-{
-	*stats = enic->fdir.stats;
-}
-
-void enic_fdir_info_get(struct enic *enic, struct rte_eth_fdir_info *info)
-{
-	info->mode = (enum rte_fdir_mode)enic->fdir.modes;
-	info->flow_types_mask[0] = enic->fdir.types_mask;
-}
-
 void enic_fdir_info(struct enic *enic)
 {
-	enic->fdir.modes = (u32)RTE_FDIR_MODE_PERFECT;
+	enic->fdir.modes = (uint32_t)RTE_FDIR_MODE_PERFECT;
 	enic->fdir.types_mask  = 1 << RTE_ETH_FLOW_NONFRAG_IPV4_UDP |
 				 1 << RTE_ETH_FLOW_NONFRAG_IPV4_TCP;
 	if (enic->adv_filters) {
@@ -121,7 +109,7 @@ copy_fltr_v2(struct filter_v2 *fltr, const struct rte_eth_fdir_input *input,
 	memset(gp, 0, sizeof(*gp));
 
 	if (input->flow_type == RTE_ETH_FLOW_NONFRAG_IPV4_UDP) {
-		struct udp_hdr udp_mask, udp_val;
+		struct rte_udp_hdr udp_mask, udp_val;
 		memset(&udp_mask, 0, sizeof(udp_mask));
 		memset(&udp_val, 0, sizeof(udp_val));
 
@@ -135,9 +123,9 @@ copy_fltr_v2(struct filter_v2 *fltr, const struct rte_eth_fdir_input *input,
 		}
 
 		enic_set_layer(gp, FILTER_GENERIC_1_UDP, FILTER_GENERIC_1_L4,
-			       &udp_mask, &udp_val, sizeof(struct udp_hdr));
+			       &udp_mask, &udp_val, sizeof(struct rte_udp_hdr));
 	} else if (input->flow_type == RTE_ETH_FLOW_NONFRAG_IPV4_TCP) {
-		struct tcp_hdr tcp_mask, tcp_val;
+		struct rte_tcp_hdr tcp_mask, tcp_val;
 		memset(&tcp_mask, 0, sizeof(tcp_mask));
 		memset(&tcp_val, 0, sizeof(tcp_val));
 
@@ -151,9 +139,9 @@ copy_fltr_v2(struct filter_v2 *fltr, const struct rte_eth_fdir_input *input,
 		}
 
 		enic_set_layer(gp, FILTER_GENERIC_1_TCP, FILTER_GENERIC_1_L4,
-			       &tcp_mask, &tcp_val, sizeof(struct tcp_hdr));
+			       &tcp_mask, &tcp_val, sizeof(struct rte_tcp_hdr));
 	} else if (input->flow_type == RTE_ETH_FLOW_NONFRAG_IPV4_SCTP) {
-		struct sctp_hdr sctp_mask, sctp_val;
+		struct rte_sctp_hdr sctp_mask, sctp_val;
 		memset(&sctp_mask, 0, sizeof(sctp_mask));
 		memset(&sctp_val, 0, sizeof(sctp_val));
 
@@ -176,16 +164,16 @@ copy_fltr_v2(struct filter_v2 *fltr, const struct rte_eth_fdir_input *input,
 		 * manually set proto_id=sctp below.
 		 */
 		enic_set_layer(gp, 0, FILTER_GENERIC_1_L4, &sctp_mask,
-			       &sctp_val, sizeof(struct sctp_hdr));
+			       &sctp_val, sizeof(struct rte_sctp_hdr));
 	}
 
 	if (input->flow_type == RTE_ETH_FLOW_NONFRAG_IPV4_UDP ||
 	    input->flow_type == RTE_ETH_FLOW_NONFRAG_IPV4_TCP ||
 	    input->flow_type == RTE_ETH_FLOW_NONFRAG_IPV4_SCTP ||
 	    input->flow_type == RTE_ETH_FLOW_NONFRAG_IPV4_OTHER) {
-		struct ipv4_hdr ip4_mask, ip4_val;
-		memset(&ip4_mask, 0, sizeof(struct ipv4_hdr));
-		memset(&ip4_val, 0, sizeof(struct ipv4_hdr));
+		struct rte_ipv4_hdr ip4_mask, ip4_val;
+		memset(&ip4_mask, 0, sizeof(struct rte_ipv4_hdr));
+		memset(&ip4_val, 0, sizeof(struct rte_ipv4_hdr));
 
 		if (input->flow.ip4_flow.tos) {
 			ip4_mask.type_of_service = masks->ipv4_mask.tos;
@@ -213,11 +201,11 @@ copy_fltr_v2(struct filter_v2 *fltr, const struct rte_eth_fdir_input *input,
 		}
 
 		enic_set_layer(gp, FILTER_GENERIC_1_IPV4, FILTER_GENERIC_1_L3,
-			       &ip4_mask, &ip4_val, sizeof(struct ipv4_hdr));
+			&ip4_mask, &ip4_val, sizeof(struct rte_ipv4_hdr));
 	}
 
 	if (input->flow_type == RTE_ETH_FLOW_NONFRAG_IPV6_UDP) {
-		struct udp_hdr udp_mask, udp_val;
+		struct rte_udp_hdr udp_mask, udp_val;
 		memset(&udp_mask, 0, sizeof(udp_mask));
 		memset(&udp_val, 0, sizeof(udp_val));
 
@@ -230,9 +218,9 @@ copy_fltr_v2(struct filter_v2 *fltr, const struct rte_eth_fdir_input *input,
 			udp_val.dst_port = input->flow.udp6_flow.dst_port;
 		}
 		enic_set_layer(gp, FILTER_GENERIC_1_UDP, FILTER_GENERIC_1_L4,
-			       &udp_mask, &udp_val, sizeof(struct udp_hdr));
+			       &udp_mask, &udp_val, sizeof(struct rte_udp_hdr));
 	} else if (input->flow_type == RTE_ETH_FLOW_NONFRAG_IPV6_TCP) {
-		struct tcp_hdr tcp_mask, tcp_val;
+		struct rte_tcp_hdr tcp_mask, tcp_val;
 		memset(&tcp_mask, 0, sizeof(tcp_mask));
 		memset(&tcp_val, 0, sizeof(tcp_val));
 
@@ -245,9 +233,9 @@ copy_fltr_v2(struct filter_v2 *fltr, const struct rte_eth_fdir_input *input,
 			tcp_val.dst_port = input->flow.tcp6_flow.dst_port;
 		}
 		enic_set_layer(gp, FILTER_GENERIC_1_TCP, FILTER_GENERIC_1_L4,
-			       &tcp_mask, &tcp_val, sizeof(struct tcp_hdr));
+			       &tcp_mask, &tcp_val, sizeof(struct rte_tcp_hdr));
 	} else if (input->flow_type == RTE_ETH_FLOW_NONFRAG_IPV6_SCTP) {
-		struct sctp_hdr sctp_mask, sctp_val;
+		struct rte_sctp_hdr sctp_mask, sctp_val;
 		memset(&sctp_mask, 0, sizeof(sctp_mask));
 		memset(&sctp_val, 0, sizeof(sctp_val));
 
@@ -265,16 +253,16 @@ copy_fltr_v2(struct filter_v2 *fltr, const struct rte_eth_fdir_input *input,
 		}
 
 		enic_set_layer(gp, 0, FILTER_GENERIC_1_L4, &sctp_mask,
-			       &sctp_val, sizeof(struct sctp_hdr));
+			       &sctp_val, sizeof(struct rte_sctp_hdr));
 	}
 
 	if (input->flow_type == RTE_ETH_FLOW_NONFRAG_IPV6_UDP ||
 	    input->flow_type == RTE_ETH_FLOW_NONFRAG_IPV6_TCP ||
 	    input->flow_type == RTE_ETH_FLOW_NONFRAG_IPV6_SCTP ||
 	    input->flow_type == RTE_ETH_FLOW_NONFRAG_IPV6_OTHER) {
-		struct ipv6_hdr ipv6_mask, ipv6_val;
-		memset(&ipv6_mask, 0, sizeof(struct ipv6_hdr));
-		memset(&ipv6_val, 0, sizeof(struct ipv6_hdr));
+		struct rte_ipv6_hdr ipv6_mask, ipv6_val;
+		memset(&ipv6_mask, 0, sizeof(struct rte_ipv6_hdr));
+		memset(&ipv6_val, 0, sizeof(struct rte_ipv6_hdr));
 
 		if (input->flow.ipv6_flow.proto) {
 			ipv6_mask.proto = masks->ipv6_mask.proto;
@@ -302,170 +290,13 @@ copy_fltr_v2(struct filter_v2 *fltr, const struct rte_eth_fdir_input *input,
 		}
 
 		enic_set_layer(gp, FILTER_GENERIC_1_IPV6, FILTER_GENERIC_1_L3,
-			       &ipv6_mask, &ipv6_val, sizeof(struct ipv6_hdr));
+			&ipv6_mask, &ipv6_val, sizeof(struct rte_ipv6_hdr));
 	}
-}
-
-int enic_fdir_del_fltr(struct enic *enic, struct rte_eth_fdir_filter *params)
-{
-	int32_t pos;
-	struct enic_fdir_node *key;
-	/* See if the key is in the table */
-	pos = rte_hash_del_key(enic->fdir.hash, params);
-	switch (pos) {
-	case -EINVAL:
-	case -ENOENT:
-		enic->fdir.stats.f_remove++;
-		return -EINVAL;
-	default:
-		/* The entry is present in the table */
-		key = enic->fdir.nodes[pos];
-
-		/* Delete the filter */
-		vnic_dev_classifier(enic->vdev, CLSF_DEL,
-			&key->fltr_id, NULL, NULL);
-		rte_free(key);
-		enic->fdir.nodes[pos] = NULL;
-		enic->fdir.stats.free++;
-		enic->fdir.stats.remove++;
-		break;
-	}
-	return 0;
-}
-
-int enic_fdir_add_fltr(struct enic *enic, struct rte_eth_fdir_filter *params)
-{
-	struct enic_fdir_node *key;
-	struct filter_v2 fltr;
-	int32_t pos;
-	u8 do_free = 0;
-	u16 old_fltr_id = 0;
-	u32 flowtype_supported;
-	u16 flex_bytes;
-	u16 queue;
-	struct filter_action_v2 action;
-
-	memset(&fltr, 0, sizeof(fltr));
-	memset(&action, 0, sizeof(action));
-	flowtype_supported = enic->fdir.types_mask
-			     & (1 << params->input.flow_type);
-
-	flex_bytes = ((params->input.flow_ext.flexbytes[1] << 8 & 0xFF00) |
-		(params->input.flow_ext.flexbytes[0] & 0xFF));
-
-	if (!enic->fdir.hash ||
-		(params->input.flow_ext.vlan_tci & 0xFFF) ||
-		!flowtype_supported || flex_bytes ||
-		params->action.behavior /* drop */) {
-		enic->fdir.stats.f_add++;
-		return -ENOTSUP;
-	}
-
-	/* Get the enicpmd RQ from the DPDK Rx queue */
-	queue = enic_rte_rq_idx_to_sop_idx(params->action.rx_queue);
-
-	if (!enic->rq[queue].in_use)
-		return -EINVAL;
-
-	/* See if the key is already there in the table */
-	pos = rte_hash_del_key(enic->fdir.hash, params);
-	switch (pos) {
-	case -EINVAL:
-		enic->fdir.stats.f_add++;
-		return -EINVAL;
-	case -ENOENT:
-		/* Add a new classifier entry */
-		if (!enic->fdir.stats.free) {
-			enic->fdir.stats.f_add++;
-			return -ENOSPC;
-		}
-		key = rte_zmalloc("enic_fdir_node",
-				  sizeof(struct enic_fdir_node), 0);
-		if (!key) {
-			enic->fdir.stats.f_add++;
-			return -ENOMEM;
-		}
-		break;
-	default:
-		/* The entry is already present in the table.
-		 * Check if there is a change in queue
-		 */
-		key = enic->fdir.nodes[pos];
-		enic->fdir.nodes[pos] = NULL;
-		if (unlikely(key->rq_index == queue)) {
-			/* Nothing to be done */
-			enic->fdir.stats.f_add++;
-			pos = rte_hash_add_key(enic->fdir.hash, params);
-			if (pos < 0) {
-				dev_err(enic, "Add hash key failed\n");
-				return pos;
-			}
-			enic->fdir.nodes[pos] = key;
-			dev_warning(enic,
-				"FDIR rule is already present\n");
-			return 0;
-		}
-
-		if (likely(enic->fdir.stats.free)) {
-			/* Add the filter and then delete the old one.
-			 * This is to avoid packets from going into the
-			 * default queue during the window between
-			 * delete and add
-			 */
-			do_free = 1;
-			old_fltr_id = key->fltr_id;
-		} else {
-			/* No free slots in the classifier.
-			 * Delete the filter and add the modified one later
-			 */
-			vnic_dev_classifier(enic->vdev, CLSF_DEL,
-				&key->fltr_id, NULL, NULL);
-			enic->fdir.stats.free++;
-		}
-
-		break;
-	}
-
-	key->filter = *params;
-	key->rq_index = queue;
-
-	enic->fdir.copy_fltr_fn(&fltr, &params->input,
-				&enic->rte_dev->data->dev_conf.fdir_conf.mask);
-	action.type = FILTER_ACTION_RQ_STEERING;
-	action.rq_idx = queue;
-
-	if (!vnic_dev_classifier(enic->vdev, CLSF_ADD, &queue, &fltr,
-	    &action)) {
-		key->fltr_id = queue;
-	} else {
-		dev_err(enic, "Add classifier entry failed\n");
-		enic->fdir.stats.f_add++;
-		rte_free(key);
-		return -1;
-	}
-
-	if (do_free)
-		vnic_dev_classifier(enic->vdev, CLSF_DEL, &old_fltr_id, NULL,
-				    NULL);
-	else{
-		enic->fdir.stats.free--;
-		enic->fdir.stats.add++;
-	}
-
-	pos = rte_hash_add_key(enic->fdir.hash, params);
-	if (pos < 0) {
-		enic->fdir.stats.f_add++;
-		dev_err(enic, "Add hash key failed\n");
-		return pos;
-	}
-
-	enic->fdir.nodes[pos] = key;
-	return 0;
 }
 
 void enic_clsf_destroy(struct enic *enic)
 {
-	u32 index;
+	uint32_t index;
 	struct enic_fdir_node *key;
 	/* delete classifier entries */
 	for (index = 0; index < ENICPMD_FDIR_MAX; index++) {

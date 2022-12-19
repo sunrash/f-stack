@@ -83,16 +83,15 @@ pipeline_queue_worker_single_stage_burst_tx(void *arg)
 			rte_prefetch0(ev[i + 1].mbuf);
 			if (ev[i].sched_type == RTE_SCHED_TYPE_ATOMIC) {
 				pipeline_event_tx(dev, port, &ev[i]);
-				ev[i].op = RTE_EVENT_OP_RELEASE;
 				w->processed_pkts++;
 			} else {
 				ev[i].queue_id++;
 				pipeline_fwd_event(&ev[i],
 						RTE_SCHED_TYPE_ATOMIC);
+				pipeline_event_enqueue_burst(dev, port, ev,
+						nb_rx);
 			}
 		}
-
-		pipeline_event_enqueue_burst(dev, port, ev, nb_rx);
 	}
 
 	return 0;
@@ -180,13 +179,13 @@ pipeline_queue_worker_multi_stage_fwd(void *arg)
 			ev.queue_id = tx_queue[ev.mbuf->port];
 			rte_event_eth_tx_adapter_txq_set(ev.mbuf, 0);
 			pipeline_fwd_event(&ev, RTE_SCHED_TYPE_ATOMIC);
+			pipeline_event_enqueue(dev, port, &ev);
 			w->processed_pkts++;
 		} else {
 			ev.queue_id++;
 			pipeline_fwd_event(&ev, sched_type_list[cq_id]);
+			pipeline_event_enqueue(dev, port, &ev);
 		}
-
-		pipeline_event_enqueue(dev, port, &ev);
 	}
 
 	return 0;
@@ -213,7 +212,6 @@ pipeline_queue_worker_multi_stage_burst_tx(void *arg)
 
 			if (ev[i].queue_id == tx_queue[ev[i].mbuf->port]) {
 				pipeline_event_tx(dev, port, &ev[i]);
-				ev[i].op = RTE_EVENT_OP_RELEASE;
 				w->processed_pkts++;
 				continue;
 			}
@@ -222,9 +220,8 @@ pipeline_queue_worker_multi_stage_burst_tx(void *arg)
 			pipeline_fwd_event(&ev[i], cq_id != last_queue ?
 					sched_type_list[cq_id] :
 					RTE_SCHED_TYPE_ATOMIC);
+			pipeline_event_enqueue_burst(dev, port, ev, nb_rx);
 		}
-
-		pipeline_event_enqueue_burst(dev, port, ev, nb_rx);
 	}
 
 	return 0;
@@ -237,6 +234,7 @@ pipeline_queue_worker_multi_stage_burst_fwd(void *arg)
 	const uint8_t *tx_queue = t->tx_evqueue_id;
 
 	while (t->done == false) {
+		uint16_t processed_pkts = 0;
 		uint16_t nb_rx = rte_event_dequeue_burst(dev, port, ev,
 				BURST_SIZE, 0);
 
@@ -254,7 +252,7 @@ pipeline_queue_worker_multi_stage_burst_fwd(void *arg)
 				rte_event_eth_tx_adapter_txq_set(ev[i].mbuf, 0);
 				pipeline_fwd_event(&ev[i],
 						RTE_SCHED_TYPE_ATOMIC);
-				w->processed_pkts++;
+				processed_pkts++;
 			} else {
 				ev[i].queue_id++;
 				pipeline_fwd_event(&ev[i],
@@ -263,6 +261,7 @@ pipeline_queue_worker_multi_stage_burst_fwd(void *arg)
 		}
 
 		pipeline_event_enqueue_burst(dev, port, ev, nb_rx);
+		w->processed_pkts += processed_pkts;
 	}
 
 	return 0;
@@ -334,17 +333,7 @@ pipeline_queue_eventdev_setup(struct evt_test *test, struct evt_options *opt)
 	memset(queue_arr, 0, sizeof(uint8_t) * RTE_EVENT_MAX_QUEUES_PER_DEV);
 
 	rte_event_dev_info_get(opt->dev_id, &info);
-	const struct rte_event_dev_config config = {
-			.nb_event_queues = nb_queues,
-			.nb_event_ports = nb_ports,
-			.nb_events_limit  = info.max_num_events,
-			.nb_event_queue_flows = opt->nb_flows,
-			.nb_event_port_dequeue_depth =
-				info.max_event_port_dequeue_depth,
-			.nb_event_port_enqueue_depth =
-				info.max_event_port_enqueue_depth,
-	};
-	ret = rte_event_dev_configure(opt->dev_id, &config);
+	ret = evt_configure_eventdev(opt, nb_queues, nb_ports);
 	if (ret) {
 		evt_err("failed to configure eventdev %d", opt->dev_id);
 		return ret;
@@ -456,6 +445,13 @@ pipeline_queue_eventdev_setup(struct evt_test *test, struct evt_options *opt)
 		}
 	}
 
+	ret = rte_event_dev_start(opt->dev_id);
+	if (ret) {
+		evt_err("failed to start eventdev %d", opt->dev_id);
+		return ret;
+	}
+
+
 	RTE_ETH_FOREACH_DEV(prod) {
 		ret = rte_eth_dev_start(prod);
 		if (ret) {
@@ -464,12 +460,6 @@ pipeline_queue_eventdev_setup(struct evt_test *test, struct evt_options *opt)
 			return ret;
 		}
 
-	}
-
-	ret = rte_event_dev_start(opt->dev_id);
-	if (ret) {
-		evt_err("failed to start eventdev %d", opt->dev_id);
-		return ret;
 	}
 
 	RTE_ETH_FOREACH_DEV(prod) {

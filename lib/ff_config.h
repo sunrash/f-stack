@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 THL A29 Limited, a Tencent company.
+ * Copyright (C) 2017-2021 THL A29 Limited, a Tencent company.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -35,12 +35,16 @@ extern "C" {
 #define DPDK_CONFIG_NUM 16
 #define DPDK_CONFIG_MAXLEN 256
 #define DPDK_MAX_LCORE 128
+#define PCAP_SNAP_MINLEN 94
+#define PCAP_SAVE_MINLEN (2<<22)
 
 extern int dpdk_argc;
 extern char *dpdk_argv[DPDK_CONFIG_NUM + 1];
 
 #define MAX_PKT_BURST 32
 #define BURST_TX_DRAIN_US 100 /* TX drain every ~100us */
+
+#define VIP_MAX_NUM 64
 
 struct ff_hw_features {
     uint8_t rx_csum;
@@ -52,6 +56,7 @@ struct ff_hw_features {
 
 struct ff_port_cfg {
     char *name;
+    char *ifname;
     uint8_t port_id;
     uint8_t mac[6];
     struct ff_hw_features hw_features;
@@ -59,7 +64,22 @@ struct ff_port_cfg {
     char *netmask;
     char *broadcast;
     char *gateway;
-    char *pcap;
+
+    char *vip_ifname;
+    char *vip_addr_str;
+    char **vip_addr_array;
+    uint32_t nb_vip;
+
+#ifdef INET6
+    char *addr6_str;
+    char *gateway6_str;
+    uint8_t prefix_len;
+
+    char *vip_addr6_str;
+    char **vip_addr6_array;
+    uint32_t nb_vip6;
+    uint8_t vip_prefix_len;
+#endif
 
     int nb_lcores;
     int nb_slaves;
@@ -112,6 +132,12 @@ struct ff_config {
         /* specify base virtual address to map. */
         char *base_virtaddr;
 
+        /* allow processes that do not want to co-operate to have different memory regions */
+        char *file_prefix;
+
+        /* load an external driver */
+        char *pci_whitelist;
+
         int nb_channel;
         int memory;
         int no_huge;
@@ -124,6 +150,7 @@ struct ff_config {
         int tso;
         int tx_csum_offoad_skip;
         int vlan_strip;
+        int symmetric_rss;
 
         /* sleep x microseconds when no pkts incomming */
         unsigned idle_sleep;
@@ -137,6 +164,9 @@ struct ff_config {
         int nb_ports;
         uint16_t max_portid;
         uint16_t *portid_list;
+
+        // load dpdk log level
+        uint16_t log_level;
         // MAP(portid => struct ff_port_cfg*)
         struct ff_port_cfg *port_cfgs;
         struct ff_vdev_cfg *vdev_cfgs;
@@ -145,6 +175,7 @@ struct ff_config {
 
     struct {
         int enable;
+        char *kni_action;
         char *method;
         char *tcp_port;
         char *udp_port;
@@ -163,6 +194,13 @@ struct ff_config {
         int fd_reserve;
         int mem_size;
     } freebsd;
+
+    struct {
+        uint16_t enable;
+        uint16_t snap_len;
+        uint32_t save_len;
+        char*	 save_path;
+    } pcap;
 };
 
 extern struct ff_config ff_global_cfg;

@@ -19,11 +19,13 @@ Supported features
 - RSS (Receive Side Scaling)
 - Checksum offload
 - Jumbo Frame up to 16K
+- MACSEC offload
 
-Configuration Information
+Experimental API features
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
-- ``CONFIG_RTE_LIBRTE_ATLANTIC_PMD`` (default ``y``)
+- MACSEC PMD API is considered as experimental and is subject to change/removal in next DPDK releases.
+
 
 Application Programming Interface
 ---------------------------------

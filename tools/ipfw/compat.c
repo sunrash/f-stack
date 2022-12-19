@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 THL A29 Limited, a Tencent company.
+ * Copyright (C) 2017-2021 THL A29 Limited, a Tencent company.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -87,7 +87,6 @@ ipfw_ctl(int cmd, int level, int optname, void *optval, socklen_t *optlen)
         ret = ff_ipc_recv(&retmsg, msg->msg_type);
         if (ret < 0) {
             errno = EPIPE;
-            ff_ipc_msg_free(msg);
             return -1;
         }
     } while (msg != retmsg);

@@ -93,8 +93,8 @@ static void
 ieee1588_packet_fwd(struct fwd_stream *fs)
 {
 	struct rte_mbuf  *mb;
-	struct ether_hdr *eth_hdr;
-	struct ether_addr addr;
+	struct rte_ether_hdr *eth_hdr;
+	struct rte_ether_addr addr;
 	struct ptpv2_msg *ptp_hdr;
 	uint16_t eth_type;
 	uint32_t timesync_index;
@@ -111,11 +111,11 @@ ieee1588_packet_fwd(struct fwd_stream *fs)
 	 * Check that the received packet is a PTP packet that was detected
 	 * by the hardware.
 	 */
-	eth_hdr = rte_pktmbuf_mtod(mb, struct ether_hdr *);
+	eth_hdr = rte_pktmbuf_mtod(mb, struct rte_ether_hdr *);
 	eth_type = rte_be_to_cpu_16(eth_hdr->ether_type);
 
 	if (! (mb->ol_flags & PKT_RX_IEEE1588_PTP)) {
-		if (eth_type == ETHER_TYPE_1588) {
+		if (eth_type == RTE_ETHER_TYPE_1588) {
 			printf("Port %u Received PTP packet not filtered"
 			       " by hardware\n",
 			       fs->rx_port);
@@ -128,7 +128,7 @@ ieee1588_packet_fwd(struct fwd_stream *fs)
 		rte_pktmbuf_free(mb);
 		return;
 	}
-	if (eth_type != ETHER_TYPE_1588) {
+	if (eth_type != RTE_ETHER_TYPE_1588) {
 		printf("Port %u Received NON PTP packet incorrectly"
 		       " detected by hardware\n",
 		       fs->rx_port);
@@ -141,7 +141,7 @@ ieee1588_packet_fwd(struct fwd_stream *fs)
 	 * PTP_SYNC_MESSAGE.
 	 */
 	ptp_hdr = (struct ptpv2_msg *) (rte_pktmbuf_mtod(mb, char *) +
-					sizeof(struct ether_hdr));
+					sizeof(struct rte_ether_hdr));
 	if (ptp_hdr->version != 0x02) {
 		printf("Port %u Received PTP V2 Ethernet frame with wrong PTP"
 		       " protocol version 0x%x (should be 0x02)\n",
@@ -178,9 +178,9 @@ ieee1588_packet_fwd(struct fwd_stream *fs)
 	port_ieee1588_rx_timestamp_check(fs->rx_port, timesync_index);
 
 	/* Swap dest and src mac addresses. */
-	ether_addr_copy(&eth_hdr->d_addr, &addr);
-	ether_addr_copy(&eth_hdr->s_addr, &eth_hdr->d_addr);
-	ether_addr_copy(&addr, &eth_hdr->s_addr);
+	rte_ether_addr_copy(&eth_hdr->d_addr, &addr);
+	rte_ether_addr_copy(&eth_hdr->s_addr, &eth_hdr->d_addr);
+	rte_ether_addr_copy(&addr, &eth_hdr->s_addr);
 
 	/* Forward PTP packet with hardware TX timestamp */
 	mb->ol_flags |= PKT_TX_IEEE1588_TMST;
@@ -198,10 +198,11 @@ ieee1588_packet_fwd(struct fwd_stream *fs)
 	port_ieee1588_tx_timestamp_check(fs->rx_port);
 }
 
-static void
+static int
 port_ieee1588_fwd_begin(portid_t pi)
 {
 	rte_eth_timesync_enable(pi);
+	return 0;
 }
 
 static void
@@ -210,9 +211,22 @@ port_ieee1588_fwd_end(portid_t pi)
 	rte_eth_timesync_disable(pi);
 }
 
+static void
+port_ieee1588_stream_init(struct fwd_stream *fs)
+{
+	bool rx_stopped, tx_stopped;
+
+	rx_stopped = ports[fs->rx_port].rxq[fs->rx_queue].state ==
+						RTE_ETH_QUEUE_STATE_STOPPED;
+	tx_stopped = ports[fs->tx_port].txq[fs->tx_queue].state ==
+						RTE_ETH_QUEUE_STATE_STOPPED;
+	fs->disabled = rx_stopped || tx_stopped;
+}
+
 struct fwd_engine ieee1588_fwd_engine = {
 	.fwd_mode_name  = "ieee1588",
 	.port_fwd_begin = port_ieee1588_fwd_begin,
 	.port_fwd_end   = port_ieee1588_fwd_end,
+	.stream_init    = port_ieee1588_stream_init,
 	.packet_fwd     = ieee1588_packet_fwd,
 };

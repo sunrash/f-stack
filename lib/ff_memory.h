@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 THL A29 Limited, a Tencent company.
+ * Copyright (C) 2017-2021 THL A29 Limited, a Tencent company.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -89,7 +89,7 @@ struct lcore_conf {
     uint16_t tx_port_id[RTE_MAX_ETHPORTS];
     uint16_t tx_queue_id[RTE_MAX_ETHPORTS];
     struct mbuf_table tx_mbufs[RTE_MAX_ETHPORTS];
-    char *pcap[RTE_MAX_ETHPORTS];
+    //char *pcap[RTE_MAX_ETHPORTS];
 } __rte_cache_aligned;
 
 #ifdef FF_USE_PAGE_ARRAY

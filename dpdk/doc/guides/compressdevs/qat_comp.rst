@@ -9,6 +9,7 @@ support for the following hardware accelerator devices:
 
 * ``Intel QuickAssist Technology C62x``
 * ``Intel QuickAssist Technology C3xxx``
+* ``Intel QuickAssist Technology DH895x``
 
 
 Features
@@ -28,12 +29,20 @@ Checksum generation:
 
     * CRC32, Adler and combined checksum
 
+Stateful operation:
+
+    * Decompression only
+
 Limitations
 -----------
 
 * Compressdev level 0, no compression, is not supported.
-* Queue pairs are not thread-safe (that is, within a single queue pair, RX and TX from different lcores is not supported).
+* Queue-pairs are thread-safe on Intel CPUs but Queues are not (that is, within a single
+  queue-pair all enqueues to the TX queue must be done from one thread and all dequeues
+  from the RX queue must be done from one thread, but enqueues and dequeues may be done
+  in different threads.)
 * No BSD support as BSD QAT kernel driver not available.
+* Stateful compression is not supported.
 
 
 Installation

@@ -17,11 +17,21 @@
 
 #include "eal_private.h"
 
-/* global log structure */
-struct rte_logs rte_logs = {
+struct rte_log_dynamic_type {
+	const char *name;
+	uint32_t loglevel;
+};
+
+/** The rte_log structure. */
+static struct rte_logs {
+	uint32_t type;  /**< Bitfield with enabled logs. */
+	uint32_t level; /**< Log level. */
+	FILE *file;     /**< Output file set by rte_openlog_stream, or NULL. */
+	size_t dynamic_types_len;
+	struct rte_log_dynamic_type *dynamic_types;
+} rte_logs = {
 	.type = ~0,
 	.level = RTE_LOG_DEBUG,
-	.file = NULL,
 };
 
 struct rte_eal_opt_loglevel {
@@ -29,7 +39,7 @@ struct rte_eal_opt_loglevel {
 	TAILQ_ENTRY(rte_eal_opt_loglevel) next;
 	/** Compiled regular expression obtained from the option */
 	regex_t re_match;
-	/** Glob match string option */
+	/** Globbing pattern option */
 	char *pattern;
 	/** Log level value obtained from the option */
 	uint32_t level;
@@ -45,17 +55,12 @@ static struct rte_eal_opt_loglevel_list opt_loglevel_list =
 static FILE *default_log_stream;
 
 /**
- * This global structure stores some informations about the message
+ * This global structure stores some information about the message
  * that is currently being processed by one lcore
  */
 struct log_cur_msg {
 	uint32_t loglevel; /**< log level - see rte_log.h */
 	uint32_t logtype;  /**< log type  - see rte_log.h */
-};
-
-struct rte_log_dynamic_type {
-	const char *name;
-	uint32_t loglevel;
 };
 
  /* per core log */
@@ -69,6 +74,24 @@ rte_openlog_stream(FILE *f)
 {
 	rte_logs.file = f;
 	return 0;
+}
+
+FILE *
+rte_log_get_stream(void)
+{
+	FILE *f = rte_logs.file;
+
+	if (f == NULL) {
+		/*
+		 * Grab the current value of stderr here, rather than
+		 * just initializing default_log_stream to stderr. This
+		 * ensures that we will always use the current value
+		 * of stderr, even if the application closes and
+		 * reopens it.
+		 */
+		return default_log_stream ? : stderr;
+	}
+	return f;
 }
 
 /* Set global log level */
@@ -92,6 +115,24 @@ rte_log_get_level(uint32_t type)
 		return -1;
 
 	return rte_logs.dynamic_types[type].loglevel;
+}
+
+bool
+rte_log_can_log(uint32_t logtype, uint32_t level)
+{
+	int log_level;
+
+	if (level > rte_log_get_global_level())
+		return false;
+
+	log_level = rte_log_get_level(logtype);
+	if (log_level < 0)
+		return false;
+
+	if (level > (uint32_t)log_level)
+		return false;
+
+	return true;
 }
 
 int
@@ -171,7 +212,7 @@ int rte_log_save_regexp(const char *regex, int tmp)
 	return rte_log_save_level(tmp, regex, NULL);
 }
 
-/* set log level based on glob (file match) pattern */
+/* set log level based on globbing pattern */
 int
 rte_log_set_level_pattern(const char *pattern, uint32_t level)
 {
@@ -268,7 +309,7 @@ rte_log_register(const char *name)
 }
 
 /* Register an extended log type and try to pick its level from EAL options */
-int __rte_experimental
+int
 rte_log_register_type_and_pick_level(const char *name, uint32_t level_def)
 {
 	struct rte_eal_opt_loglevel *opt_ll;
@@ -284,7 +325,7 @@ rte_log_register_type_and_pick_level(const char *name, uint32_t level_def)
 			continue;
 
 		if (opt_ll->pattern) {
-			if (fnmatch(opt_ll->pattern, name, 0))
+			if (fnmatch(opt_ll->pattern, name, 0) == 0)
 				level = opt_ll->level;
 		} else {
 			if (regexec(&opt_ll->re_match, name, 0, NULL, 0) == 0)
@@ -396,27 +437,12 @@ rte_log_dump(FILE *f)
 int
 rte_vlog(uint32_t level, uint32_t logtype, const char *format, va_list ap)
 {
+	FILE *f = rte_log_get_stream();
 	int ret;
-	FILE *f = rte_logs.file;
-	if (f == NULL) {
-		f = default_log_stream;
-		if (f == NULL) {
-			/*
-			 * Grab the current value of stderr here, rather than
-			 * just initializing default_log_stream to stderr. This
-			 * ensures that we will always use the current value
-			 * of stderr, even if the application closes and
-			 * reopens it.
-			 */
-			f = stderr;
-		}
-	}
 
-	if (level > rte_logs.level)
-		return 0;
 	if (logtype >= rte_logs.dynamic_types_len)
 		return -1;
-	if (level > rte_logs.dynamic_types[logtype].loglevel)
+	if (!rte_log_can_log(logtype, level))
 		return 0;
 
 	/* save loglevel and logtype in a global per-lcore variable */

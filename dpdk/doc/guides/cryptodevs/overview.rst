@@ -19,7 +19,7 @@ Supported Feature Flags
 
    - "OOP SGL In SGL Out" feature flag stands for
      "Out-of-place Scatter-gather list Input, Scatter-gather list Output",
-     which means pmd supports different scatter-gather styled input and output buffers
+     which means PMD supports different scatter-gather styled input and output buffers
      (i.e. both can consists of multiple segments).
 
    - "OOP SGL In LB Out" feature flag stands for
@@ -36,6 +36,15 @@ Supported Feature Flags
      "Out-of-place Linear Buffers Input, Linear Buffers Output",
      which means that Out-of-place operation is supported,
      with linear input and output buffers.
+
+   - "RSA PRIV OP KEY EXP" feature flag means PMD support RSA private key
+     operation (Sign and Decrypt) using exponent key type only.
+
+   - "RSA PRIV OP KEY QT" feature flag means PMD support RSA private key
+     operation (Sign and Decrypt) using quintuple (crt) type key only.
+
+   - "Digest encrypted" feature flag means PMD support hash-cipher cases,
+     where generated digest is appended to and encrypted with the data.
 
 
 Supported Cipher Algorithms

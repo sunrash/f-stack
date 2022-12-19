@@ -8,8 +8,6 @@
 #include <rte_metrics.h>
 #include <rte_bitrate.h>
 
-#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
-
 /*
  * Persistent bit-rate data.
  * @internal
@@ -37,6 +35,12 @@ rte_stats_bitrate_create(void)
 		RTE_CACHE_LINE_SIZE);
 }
 
+void
+rte_stats_bitrate_free(struct rte_stats_bitrates *bitrate_data)
+{
+	rte_free(bitrate_data);
+}
+
 int
 rte_stats_bitrate_reg(struct rte_stats_bitrates *bitrate_data)
 {
@@ -50,9 +54,11 @@ rte_stats_bitrate_reg(struct rte_stats_bitrates *bitrate_data)
 	if (bitrate_data == NULL)
 		return -EINVAL;
 
-	return_value = rte_metrics_reg_names(&names[0], ARRAY_SIZE(names));
-	if (return_value >= 0)
+	return_value = rte_metrics_reg_names(&names[0], RTE_DIM(names));
+	if (return_value >= 0) {
 		bitrate_data->id_stats_set = return_value;
+		return 0;
+	}
 	return return_value;
 }
 
@@ -74,7 +80,7 @@ rte_stats_bitrate_calc(struct rte_stats_bitrates *bitrate_data,
 
 	ret_code = rte_eth_stats_get(port_id, &eth_stats);
 	if (ret_code != 0)
-		return ret_code;
+		return ret_code < 0 ? ret_code : -ret_code;
 
 	port_data = &bitrate_data->port_stats[port_id];
 
@@ -126,7 +132,7 @@ rte_stats_bitrate_calc(struct rte_stats_bitrates *bitrate_data,
 	values[4] = port_data->peak_ibits;
 	values[5] = port_data->peak_obits;
 	ret = rte_metrics_update_values(port_id, bitrate_data->id_stats_set,
-		values, ARRAY_SIZE(values));
+		values, RTE_DIM(values));
 	if (ret < 0)
 		return ret;
 

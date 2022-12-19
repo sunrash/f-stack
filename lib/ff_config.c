@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 THL A29 Limited, a Tencent company.
+ * Copyright (C) 2017-2021 THL A29 Limited, a Tencent company.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -191,6 +191,7 @@ freebsd_conf_handler(struct ff_config *cfg, const char *section,
         }
     } else {
         fprintf(stderr, "freebsd conf section[%s] error\n", section);
+        free(newconf);
         return 0;
     }
 
@@ -367,6 +368,81 @@ parse_port_slave_list(struct ff_port_cfg *cfg, const char *v_str)
 }
 
 static int
+vip_cfg_handler(struct ff_port_cfg *cur)
+{
+    //vip cfg
+    int ret;
+    char *vip_addr_array[VIP_MAX_NUM];
+
+    ret = rte_strsplit(cur->vip_addr_str, strlen(cur->vip_addr_str), &vip_addr_array[0], VIP_MAX_NUM, ';');
+    if (ret <= 0) {
+        fprintf(stdout, "vip_cfg_handler nb_vip is 0, not set vip_addr or set invalid vip_addr %s\n",
+            cur->vip_addr_str);
+        return 1;
+    }
+
+    cur->nb_vip = ret;
+
+    cur->vip_addr_array = (char **)calloc(cur->nb_vip, sizeof(char *));
+    if (cur->vip_addr_array == NULL) {
+        fprintf(stderr, "vip_cfg_handler malloc failed\n");
+        goto err;
+    }
+
+    memcpy(cur->vip_addr_array, vip_addr_array, cur->nb_vip * sizeof(char *));
+
+    return 1;
+
+err:
+    cur->nb_vip = 0;
+    if (cur->vip_addr_array) {
+        free(cur->vip_addr_array);
+        cur->vip_addr_array = NULL;
+    }
+
+    return 0;
+}
+
+#ifdef INET6
+static int
+vip6_cfg_handler(struct ff_port_cfg *cur)
+{
+    //vip6 cfg
+    int ret;
+    char *vip_addr6_array[VIP_MAX_NUM];
+
+    ret = rte_strsplit(cur->vip_addr6_str, strlen(cur->vip_addr6_str),
+                                    &vip_addr6_array[0], VIP_MAX_NUM, ';');
+    if (ret == 0) {
+        fprintf(stdout, "vip6_cfg_handler nb_vip6 is 0, not set vip_addr6 or set invalid vip_addr6 %s\n",
+            cur->vip_addr6_str);
+        return 1;
+    }
+
+    cur->nb_vip6 = ret;
+
+    cur->vip_addr6_array = (char **) calloc(cur->nb_vip6, sizeof(char *));
+    if (cur->vip_addr6_array == NULL) {
+        fprintf(stderr, "vip6_cfg_handler malloc failed\n");
+        goto fail;
+    }
+
+    memcpy(cur->vip_addr6_array, vip_addr6_array, cur->nb_vip6 * sizeof(char *));
+
+    return 1;
+
+fail:
+    cur->nb_vip6 = 0;
+    if (cur->vip_addr6_array) {
+        free(cur->vip_addr6_array);
+        cur->vip_addr6_array = NULL;
+    }
+
+    return 0;
+}
+#endif
+
+static int
 port_cfg_handler(struct ff_config *cfg, const char *section,
     const char *name, const char *value) {
 
@@ -414,7 +490,9 @@ port_cfg_handler(struct ff_config *cfg, const char *section,
         cur->port_id = portid;
     }
 
-    if (strcmp(name, "addr") == 0) {
+    if (strcmp(name, "if_name") == 0) {
+        cur->ifname = strdup(value);
+    } else if (strcmp(name, "addr") == 0) {
         cur->addr = strdup(value);
     } else if (strcmp(name, "netmask") == 0) {
         cur->netmask = strdup(value);
@@ -422,13 +500,35 @@ port_cfg_handler(struct ff_config *cfg, const char *section,
         cur->broadcast = strdup(value);
     } else if (strcmp(name, "gateway") == 0) {
         cur->gateway = strdup(value);
-    } else if (strcmp(name, "pcap") == 0) {
-        cur->pcap = strdup(value);
     } else if (strcmp(name, "lcore_list") == 0) {
         return parse_port_lcore_list(cur, value);
     } else if (strcmp(name, "slave_port_list") == 0) {
         return parse_port_slave_list(cur, value);
+    } else if (strcmp(name, "vip_addr") == 0) {
+        cur->vip_addr_str = strdup(value);
+        if (cur->vip_addr_str) {
+            return vip_cfg_handler(cur);
+        }
+    } else if (strcmp(name, "vip_ifname") == 0) {
+        cur->vip_ifname = strdup(value);
     }
+
+#ifdef INET6
+    else if (0 == strcmp(name, "addr6")) {
+        cur->addr6_str = strdup(value);
+    } else if (0 == strcmp(name, "prefix_len")) {
+        cur->prefix_len = atoi(value);
+    } else if (0 == strcmp(name, "gateway6")) {
+        cur->gateway6_str = strdup(value);
+    } else if (strcmp(name, "vip_addr6") == 0) {
+        cur->vip_addr6_str = strdup(value);
+        if (cur->vip_addr6_str) {
+            return vip6_cfg_handler(cur);
+        }
+    } else if (0 == strcmp(name, "vip_prefix_len")) {
+        cur->vip_prefix_len = atoi(value);
+    }
+#endif
 
     return 1;
 }
@@ -556,7 +656,9 @@ ini_parse_handler(void* user, const char* section, const char* name,
     printf("[%s]: %s=%s\n", section, name, value);
 
     #define MATCH(s, n) strcmp(section, s) == 0 && strcmp(name, n) == 0
-    if (MATCH("dpdk", "channel")) {
+    if (MATCH("dpdk", "log_level")) {
+        pconfig->dpdk.log_level = atoi(value);
+    } else if (MATCH("dpdk", "channel")) {
         pconfig->dpdk.nb_channel = atoi(value);
     } else if (MATCH("dpdk", "memory")) {
         pconfig->dpdk.memory = atoi(value);
@@ -567,6 +669,10 @@ ini_parse_handler(void* user, const char* section, const char* name,
         return parse_lcore_mask(pconfig, pconfig->dpdk.lcore_mask);
     } else if (MATCH("dpdk", "base_virtaddr")) {
         pconfig->dpdk.base_virtaddr= strdup(value);
+    } else if (MATCH("dpdk", "file_prefix")) {
+        pconfig->dpdk.file_prefix = strdup(value);
+    } else if (MATCH("dpdk", "pci_whitelist")) {
+        pconfig->dpdk.pci_whitelist = strdup(value);
     } else if (MATCH("dpdk", "port_list")) {
         return parse_port_list(pconfig, value);
     } else if (MATCH("dpdk", "nb_vdev")) {
@@ -587,8 +693,12 @@ ini_parse_handler(void* user, const char* section, const char* name,
         pconfig->dpdk.idle_sleep = atoi(value);
     } else if (MATCH("dpdk", "pkt_tx_delay")) {
         pconfig->dpdk.pkt_tx_delay = atoi(value);
+    } else if (MATCH("dpdk", "symmetric_rss")) {
+        pconfig->dpdk.symmetric_rss = atoi(value);
     } else if (MATCH("kni", "enable")) {
         pconfig->kni.enable= atoi(value);
+    } else if (MATCH("kni", "kni_action")) {
+        pconfig->kni.kni_action= strdup(value);
     } else if (MATCH("kni", "method")) {
         pconfig->kni.method= strdup(value);
     } else if (MATCH("kni", "tcp_port")) {
@@ -615,6 +725,16 @@ ini_parse_handler(void* user, const char* section, const char* name,
         return vdev_cfg_handler(pconfig, section, name, value);
     } else if (strncmp(section, "bond", 4) == 0) {
         return bond_cfg_handler(pconfig, section, name, value);
+    } else if (strcmp(section, "pcap") == 0) {
+        if (strcmp(name, "snaplen") == 0) {
+            pconfig->pcap.snap_len = (uint16_t)atoi(value);
+        } else if (strcmp(name, "savelen") == 0) {
+            pconfig->pcap.save_len = (uint32_t)atoi(value);
+        } else if (strcmp(name, "enable") == 0) {
+            pconfig->pcap.enable = (uint16_t)atoi(value);
+        } else if (strcmp(name, "savepath") == 0) {
+            pconfig->pcap.save_path = strdup(value);
+        }
     }
 
     return 1;
@@ -642,6 +762,10 @@ dpdk_args_setup(struct ff_config *cfg)
         sprintf(temp, "-m%d", cfg->dpdk.memory);
         dpdk_argv[n++] = strdup(temp);
     }
+    if (cfg->dpdk.log_level) {
+        sprintf(temp, "--log-level=%d", cfg->dpdk.log_level);
+        dpdk_argv[n++] = strdup(temp);
+    }
     if (cfg->dpdk.proc_type) {
         sprintf(temp, "--proc-type=%s", cfg->dpdk.proc_type);
         dpdk_argv[n++] = strdup(temp);
@@ -649,6 +773,20 @@ dpdk_args_setup(struct ff_config *cfg)
     if (cfg->dpdk.base_virtaddr) {
         sprintf(temp, "--base-virtaddr=%s", cfg->dpdk.base_virtaddr);
         dpdk_argv[n++] = strdup(temp);
+    }
+    if (cfg->dpdk.file_prefix) {
+        sprintf(temp, "--file-prefix=container-%s", cfg->dpdk.file_prefix);
+        dpdk_argv[n++] = strdup(temp);
+    }
+    if (cfg->dpdk.pci_whitelist) {
+        char* token;
+        char* rest = cfg->dpdk.pci_whitelist;
+
+        while ((token = strtok_r(rest, ",", &rest))){
+            sprintf(temp, "--pci-whitelist=%s", token);
+            dpdk_argv[n++] = strdup(temp);
+        }
+
     }
 
     if (cfg->dpdk.nb_vdev) {
@@ -680,8 +818,10 @@ dpdk_args_setup(struct ff_config *cfg)
         }
         sprintf(temp, "--no-pci");
         dpdk_argv[n++] = strdup(temp);
-        sprintf(temp, "--file-prefix=container");
-        dpdk_argv[n++] = strdup(temp);
+        if (!cfg->dpdk.file_prefix) {
+            sprintf(temp, "--file-prefix=container");
+            dpdk_argv[n++] = strdup(temp);
+        }
     }
 
     if (cfg->dpdk.nb_bond) {
@@ -803,6 +943,23 @@ ff_check_config(struct ff_config *cfg)
             return -1;
         }
     }
+
+    if(cfg->kni.kni_action) {
+        if (strcasecmp(cfg->kni.kni_action,"alltokni") &&
+            strcasecmp(cfg->kni.kni_action,"alltoff") &&
+            strcasecmp(cfg->kni.kni_action,"default")){
+                fprintf(stderr, "conf kni.kni_action[alltokni|alltoff|default] is error(%s)\n",
+                cfg->kni.kni_action);
+                return -1;
+        }
+    }
+
+    if (cfg->pcap.save_len < PCAP_SAVE_MINLEN)
+        cfg->pcap.save_len = PCAP_SAVE_MINLEN;
+    if (cfg->pcap.snap_len < PCAP_SNAP_MINLEN)
+        cfg->pcap.snap_len = PCAP_SNAP_MINLEN;
+    if (cfg->pcap.save_path==NULL || strlen(cfg->pcap.save_path) ==0)
+        cfg->pcap.save_path = strdup(".");
 
     #define CHECK_VALID(n) \
         do { \

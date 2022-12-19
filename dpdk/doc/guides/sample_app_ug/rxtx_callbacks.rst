@@ -13,6 +13,10 @@ In the sample application a user defined callback is applied to all received
 packets to add a timestamp. A separate callback is applied to all packets
 prior to transmission to calculate the elapsed time, in CPU cycles.
 
+If hardware timestamping is supported by the NIC, the sample application will
+also display the average latency since the packet was timestamped in hardware,
+on top of the latency since the packet was received and processed by the RX
+callback.
 
 Compiling the Application
 -------------------------
@@ -21,22 +25,18 @@ To compile the sample application see :doc:`compiling`.
 
 The application is located in the ``rxtx_callbacks`` sub-directory.
 
-The callbacks feature requires that the ``CONFIG_RTE_ETHDEV_RXTX_CALLBACKS``
-setting is on in the ``config/common_`` config file that applies to the
-target. This is generally on by default:
-
-.. code-block:: console
-
-    CONFIG_RTE_ETHDEV_RXTX_CALLBACKS=y
 
 Running the Application
 -----------------------
 
-To run the example in a ``linuxapp`` environment:
+To run the example in a ``linux`` environment:
 
 .. code-block:: console
 
-    ./build/rxtx_callbacks -l 1 -n 4
+    ./<build_dir>/examples/dpdk-rxtx_callbacks -l 1 -n 4 -- [-t]
+
+Use -t to enable hardware timestamping. If not supported by the NIC, an error
+will be displayed.
 
 Refer to *DPDK Getting Started Guide* for general information on running
 applications and the Environment Abstraction Layer (EAL) options.
@@ -79,7 +79,7 @@ comments:
     {
         struct rte_eth_conf port_conf = port_conf_default;
         const uint16_t rx_rings = 1, tx_rings = 1;
-        struct ether_addr addr;
+        struct rte_ether_addr addr;
         int retval;
         uint16_t q;
 
@@ -110,8 +110,9 @@ comments:
             return retval;
 
         /* Enable RX in promiscuous mode for the Ethernet device. */
-        rte_eth_promiscuous_enable(port);
-
+        retval = rte_eth_promiscuous_enable(port);
+        if (retval != 0)
+            return retval;
 
         /* Add the callbacks for RX and TX.*/
         rte_eth_add_rx_callback(port, 0, add_timestamps, NULL);
@@ -151,7 +152,7 @@ all packets received:
         uint64_t now = rte_rdtsc();
 
         for (i = 0; i < nb_pkts; i++)
-            pkts[i]->udata64 = now;
+            *tsc_field(pkts[i]) = now;
 
         return nb_pkts;
     }
@@ -178,7 +179,7 @@ packets prior to transmission:
         unsigned i;
 
         for (i = 0; i < nb_pkts; i++)
-            cycles += now - pkts[i]->udata64;
+            cycles += now - *tsc_field(pkts[i]);
 
         latency_numbers.total_cycles += cycles;
         latency_numbers.total_pkts   += nb_pkts;

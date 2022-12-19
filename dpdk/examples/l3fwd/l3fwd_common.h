@@ -14,7 +14,7 @@
 #define	IPV4_MAX_VER_IHL_DIFF	(IPV4_MAX_VER_IHL - IPV4_MIN_VER_IHL)
 
 /* Minimum value of IPV4 total length (20B) in network byte order. */
-#define	IPV4_MIN_LEN_BE	(sizeof(struct ipv4_hdr) << 8)
+#define	IPV4_MIN_LEN_BE	(sizeof(struct rte_ipv4_hdr) << 8)
 
 /*
  * From http://www.rfc-editor.org/rfc/rfc1812.txt section 5.2.2:
@@ -28,7 +28,7 @@
  * to BAD_PORT value.
  */
 static __rte_always_inline void
-rfc1812_process(struct ipv4_hdr *ipv4_hdr, uint16_t *dp, uint32_t ptype)
+rfc1812_process(struct rte_ipv4_hdr *ipv4_hdr, uint16_t *dp, uint32_t ptype)
 {
 	uint8_t ihl;
 
@@ -51,7 +51,7 @@ rfc1812_process(struct ipv4_hdr *ipv4_hdr, uint16_t *dp, uint32_t ptype)
 #endif /* DO_RFC_1812_CHECKS */
 
 /*
- * We group consecutive packets with the same destionation port into one burst.
+ * We group consecutive packets with the same destination port into one burst.
  * To avoid extra latency this is done together with some other packet
  * processing, but after we made a final decision about packet's destination.
  * To do this we maintain:
@@ -76,7 +76,7 @@ rfc1812_process(struct ipv4_hdr *ipv4_hdr, uint16_t *dp, uint32_t ptype)
 
 static const struct {
 	uint64_t pnum; /* prebuild 4 values for pnum[]. */
-	int32_t  idx;  /* index for new last updated elemnet. */
+	int32_t  idx;  /* index for new last updated element. */
 	uint16_t lpv;  /* add value to the last updated element. */
 } gptbl[GRPSZ] = {
 	{
@@ -236,6 +236,9 @@ send_packetsx4(struct lcore_conf *qconf, uint16_t port, struct rte_mbuf *m[],
 
 		/* copy rest of the packets into the TX buffer. */
 		len = num - n;
+		if (len == 0)
+			goto exit;
+
 		j = 0;
 		switch (len % FWDSTEP) {
 		while (j < len) {
@@ -258,6 +261,7 @@ send_packetsx4(struct lcore_conf *qconf, uint16_t port, struct rte_mbuf *m[],
 		}
 	}
 
+exit:
 	qconf->tx_mbufs[port].len = len;
 }
 

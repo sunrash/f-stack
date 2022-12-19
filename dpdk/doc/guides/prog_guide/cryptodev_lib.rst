@@ -1,5 +1,5 @@
 ..  SPDX-License-Identifier: BSD-3-Clause
-    Copyright(c) 2016-2017 Intel Corporation.
+    Copyright(c) 2016-2020 Intel Corporation.
 
 Cryptography Device Library
 ===========================
@@ -32,7 +32,7 @@ Physical Crypto devices are discovered during the PCI probe/enumeration of the
 EAL function which is executed at DPDK initialization, based on
 their PCI device identifier, each unique PCI BDF (bus/bridge, device,
 function). Specific physical Crypto devices, like other physical devices in DPDK
-can be white-listed or black-listed using the EAL command line options.
+can be listed using the EAL command line options.
 
 Virtual devices can be created by two mechanisms, either using the EAL command
 line options or from within the application using an EAL API directly.
@@ -121,9 +121,19 @@ Each queue pairs resources may be allocated on a specified socket.
                 const struct rte_cryptodev_qp_conf *qp_conf,
                 int socket_id)
 
-    struct rte_cryptodev_qp_conf {
+   struct rte_cryptodev_qp_conf {
         uint32_t nb_descriptors; /**< Number of descriptors per queue pair */
+        struct rte_mempool *mp_session;
+        /**< The mempool for creating session in sessionless mode */
+        struct rte_mempool *mp_session_private;
+        /**< The mempool for creating sess private data in sessionless mode */
     };
+
+
+The fields ``mp_session`` and ``mp_session_private`` are used for creating
+temporary session to process the crypto operations in the session-less mode.
+They can be the same other different mempools. Please note not all Cryptodev
+PMDs supports session-less mode.
 
 
 Logical Cores, Memory and Queues Pair Relationships
@@ -317,6 +327,10 @@ the set API to set the user data and retrieve it using get API.
 	void * rte_cryptodev_sym_session_get_user_data(
 		struct rte_cryptodev_sym_session *sess);
 
+Please note the ``size`` passed to set API cannot be bigger than the predefined
+``user_data_sz`` when creating the session header mempool, otherwise the
+function will return error. Also when ``user_data_sz`` was defined as ``0`` when
+creating the session header mempool, the get API will always return ``NULL``.
 
 For session-less mode, the private user data information can be placed along with the
 ``struct rte_crypto_op``. The ``rte_crypto_op::private_data_offset`` indicates the
@@ -445,21 +459,23 @@ Crypto workloads.
 
 .. figure:: img/cryptodev_sym_sess.*
 
-The Crypto device framework provides APIs to allocate and initialize sessions
-for crypto devices, where sessions are mempool objects.
-It is the application's responsibility to create and manage the session mempools.
-This approach allows for different scenarios such as having a single session
-mempool for all crypto devices (where the mempool object size is big
-enough to hold the private session of any crypto device), as well as having
-multiple session mempools of different sizes for better memory usage.
+The Crypto device framework provides APIs to create session mempool and allocate
+and initialize sessions for crypto devices, where sessions are mempool objects.
+The application has to use ``rte_cryptodev_sym_session_pool_create()`` to
+create the session header mempool that creates a mempool with proper element
+size automatically and stores necessary information for safely accessing the
+session in the mempool's private data field.
 
-An application can use ``rte_cryptodev_sym_get_private_session_size()`` to
-get the private session size of given crypto device. This function would allow
-an application to calculate the max device session size of all crypto devices
-to create a single session mempool.
-If instead an application creates multiple session mempools, the Crypto device
-framework also provides ``rte_cryptodev_sym_get_header_session_size`` to get
-the size of an uninitialized session.
+To create a mempool for storing session private data, the application has two
+options. The first is to create another mempool with elt size equal to or
+bigger than the maximum session private data size of all crypto devices that
+will share the same session header. The creation of the mempool shall use the
+traditional ``rte_mempool_create()`` with the correct ``elt_size``. The other
+option is to change the ``elt_size`` parameter in
+``rte_cryptodev_sym_session_pool_create()`` to the correct value. The first
+option is more complex to implement but may result in better memory usage as
+a session header normally takes smaller memory footprint as the session private
+data.
 
 Once the session mempools have been created, ``rte_cryptodev_sym_session_create()``
 is used to allocate an uninitialized session from the given mempool.
@@ -481,7 +497,10 @@ Symmetric Crypto transforms (``rte_crypto_sym_xform``) are the mechanism used
 to specify the details of the Crypto operation. For chaining of symmetric
 operations such as cipher encrypt and authentication generate, the next pointer
 allows transform to be chained together. Crypto devices which support chaining
-must publish the chaining of symmetric Crypto operations feature flag.
+must publish the chaining of symmetric Crypto operations feature flag. Allocation of the
+xform structure is in the application domain. To allow future API extensions in a
+backwardly compatible manner, e.g. addition of a new parameter, the application should
+zero the full xform struct before populating it.
 
 Currently there are three transforms types cipher, authentication and AEAD.
 Also it is important to note that the order in which the
@@ -581,6 +600,146 @@ chain.
         };
     };
 
+Synchronous mode
+----------------
+
+Some cryptodevs support synchronous mode alongside with a standard asynchronous
+mode. In that case operations are performed directly when calling
+``rte_cryptodev_sym_cpu_crypto_process`` method instead of enqueuing and
+dequeuing an operation before. This mode of operation allows cryptodevs which
+utilize CPU cryptographic acceleration to have significant performance boost
+comparing to standard asynchronous approach. Cryptodevs supporting synchronous
+mode have ``RTE_CRYPTODEV_FF_SYM_CPU_CRYPTO`` feature flag set.
+
+To perform a synchronous operation a call to
+``rte_cryptodev_sym_cpu_crypto_process`` has to be made with vectorized
+operation descriptor (``struct rte_crypto_sym_vec``) containing:
+
+- ``num`` - number of operations to perform,
+- pointer to an array of size ``num`` containing a scatter-gather list
+  descriptors of performed operations (``struct rte_crypto_sgl``). Each instance
+  of ``struct rte_crypto_sgl`` consists of a number of segments and a pointer to
+  an array of segment descriptors ``struct rte_crypto_vec``;
+- pointers to arrays of size ``num`` containing IV, AAD and digest information
+  in the ``cpu_crypto`` sub-structure,
+- pointer to an array of size ``num`` where status information will be stored
+  for each operation.
+
+Function returns a number of successfully completed operations and sets
+appropriate status number for each operation in the status array provided as
+a call argument. Status different than zero must be treated as error.
+
+For more details, e.g. how to convert an mbuf to an SGL, please refer to an
+example usage in the IPsec library implementation.
+
+Cryptodev Raw Data-path APIs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The Crypto Raw data-path APIs are a set of APIs designed to enable external
+libraries/applications to leverage the cryptographic processing provided by
+DPDK crypto PMDs through the cryptodev API but in a manner that is not
+dependent on native DPDK data structures (eg. rte_mbuf, rte_crypto_op, ... etc)
+in their data-path implementation.
+
+The raw data-path APIs have the following advantages:
+
+- External data structure friendly design. The new APIs uses the operation
+  descriptor ``struct rte_crypto_sym_vec`` that supports raw data pointer and
+  IOVA addresses as input. Moreover, the APIs does not require the user to
+  allocate the descriptor from mempool, nor requiring mbufs to describe input
+  data's virtual and IOVA addresses. All these features made the translation
+  from user's own data structure into the descriptor easier and more efficient.
+
+- Flexible enqueue and dequeue operation. The raw data-path APIs gives the
+  user more control to the enqueue and dequeue operations, including the
+  capability of precious enqueue/dequeue count, abandoning enqueue or dequeue
+  at any time, and operation status translation and set on the fly.
+
+Cryptodev PMDs which support the raw data-path APIs will have
+``RTE_CRYPTODEV_FF_SYM_RAW_DP`` feature flag presented. To use this feature,
+the user shall create a local ``struct rte_crypto_raw_dp_ctx`` buffer and
+extend to at least the length returned by ``rte_cryptodev_get_raw_dp_ctx_size``
+function call. The created buffer is then initialized using
+``rte_cryptodev_configure_raw_dp_ctx`` function with the ``is_update``
+parameter as 0. The library and the crypto device driver will then set the
+buffer and attach either the cryptodev sym session, the rte_security session,
+or the cryptodev xform for session-less operation into the ctx buffer, and
+set the corresponding enqueue and dequeue function handlers based on the
+algorithm information stored in the session or xform. When the ``is_update``
+parameter passed into ``rte_cryptodev_configure_raw_dp_ctx`` is 1, the driver
+will not initialize the buffer but only update the session or xform and
+the function handlers accordingly.
+
+After the ``struct rte_crypto_raw_dp_ctx`` buffer is initialized, it is now
+ready for enqueue and dequeue operation. There are two different enqueue
+functions: ``rte_cryptodev_raw_enqueue`` to enqueue single raw data
+operation, and ``rte_cryptodev_raw_enqueue_burst`` to enqueue a descriptor
+with multiple operations. In case of the application uses similar approach to
+``struct rte_crypto_sym_vec`` to manage its data burst but with different
+data structure, using the ``rte_cryptodev_raw_enqueue_burst`` function may be
+less efficient as this is a situation where the application has to loop over
+all crypto operations to assemble the ``struct rte_crypto_sym_vec`` descriptor
+from its own data structure, and then the driver will loop over them again to
+translate every operation in the descriptor to the driver's specific queue data.
+The ``rte_cryptodev_raw_enqueue`` should be used to save one loop for each data
+burst instead.
+
+The ``rte_cryptodev_raw_enqueue`` and ``rte_cryptodev_raw_enqueue_burst``
+functions will return or set the enqueue status. ``rte_cryptodev_raw_enqueue``
+will return the status directly, ``rte_cryptodev_raw_enqueue_burst`` will
+return the number of operations enqueued or stored (explained as follows) and
+set the ``enqueue_status`` buffer provided by the user. The possible
+enqueue status values are:
+
+- ``1``: the operation(s) is/are enqueued successfully.
+- ``0``: the operation(s) is/are cached successfully in the crypto device queue
+  but is not actually enqueued. The user shall call
+  ``rte_cryptodev_raw_enqueue_done`` function after the expected operations
+  are stored. The crypto device will then start enqueuing all of them at
+  once.
+- The negative integer: error occurred during enqueue.
+
+Calling ``rte_cryptodev_configure_raw_dp_ctx`` with the parameter ``is_update``
+set as 0 twice without the enqueue function returning or setting enqueue status
+to 1 or ``rte_cryptodev_raw_enqueue_done`` function being called in between will
+invalidate any operation stored in the device queue but not enqueued. This
+feature is useful when the user wants to abandon partially enqueued operations
+for a failed enqueue burst operation and try enqueuing in a whole later.
+
+Similar as enqueue, there are two dequeue functions:
+``rte_cryptodev_raw_dequeue`` for dequeuing single operation, and
+``rte_cryptodev_raw_dequeue_burst`` for dequeuing a burst of operations (e.g.
+all operations in a ``struct rte_crypto_sym_vec`` descriptor). The
+``rte_cryptodev_raw_dequeue_burst`` function allows the user to provide callback
+functions to retrieve dequeue count from the enqueued user data and write the
+expected status value to the user data on the fly. The dequeue functions also
+set the dequeue status:
+
+- ``1``: the operation(s) is/are dequeued successfully.
+- ``0``: the operation(s) is/are completed but is not actually dequeued (hence
+  still kept in the device queue). The user shall call the
+  ``rte_cryptodev_raw_dequeue_done`` function after the expected number of
+  operations (e.g. all operations in a descriptor) are dequeued. The crypto
+  device driver will then free them from the queue at once.
+- The negative integer: error occurred during dequeue.
+
+Calling ``rte_cryptodev_configure_raw_dp_ctx`` with the parameter ``is_update``
+set as 0 twice without the dequeue functions execution changed dequeue_status
+to 1 or ``rte_cryptodev_raw_dequeue_done`` function being called in between will
+revert the crypto device queue's dequeue effort to the moment when the
+``struct rte_crypto_raw_dp_ctx`` buffer is initialized. This feature is useful
+when the user wants to abandon partially dequeued data and try dequeuing again
+later in a whole.
+
+There are a few limitations to the raw data path APIs:
+
+* Only support in-place operations.
+* APIs are NOT thread-safe.
+* CANNOT mix the raw data-path API's enqueue with rte_cryptodev_enqueue_burst,
+  or vice versa.
+
+See *DPDK API Reference* for details on each API definitions.
+
 Sample code
 -----------
 
@@ -613,7 +772,8 @@ using one of the crypto PMDs available in DPDK.
     #define IV_OFFSET            (sizeof(struct rte_crypto_op) + \
                                  sizeof(struct rte_crypto_sym_op))
 
-    struct rte_mempool *mbuf_pool, *crypto_op_pool, *session_pool;
+    struct rte_mempool *mbuf_pool, *crypto_op_pool;
+    struct rte_mempool *session_pool, *session_priv_pool;
     unsigned int session_size;
     int ret;
 
@@ -663,33 +823,56 @@ using one of the crypto PMDs available in DPDK.
     /* Get private session data size. */
     session_size = rte_cryptodev_sym_get_private_session_size(cdev_id);
 
+    #ifdef USE_TWO_MEMPOOLS
+    /* Create session mempool for the session header. */
+    session_pool = rte_cryptodev_sym_session_pool_create("session_pool",
+                                    MAX_SESSIONS,
+                                    0,
+                                    POOL_CACHE_SIZE,
+                                    0,
+                                    socket_id);
+
     /*
-     * Create session mempool, with two objects per session,
-     * one for the session header and another one for the
+     * Create session private data mempool for the
      * private session data for the crypto device.
      */
-    session_pool = rte_mempool_create("session_pool",
-                                    MAX_SESSIONS * 2,
+    session_priv_pool = rte_mempool_create("session_pool",
+                                    MAX_SESSIONS,
                                     session_size,
                                     POOL_CACHE_SIZE,
                                     0, NULL, NULL, NULL,
                                     NULL, socket_id,
                                     0);
 
+    #else
+    /* Use of the same mempool for session header and private data */
+	session_pool = rte_cryptodev_sym_session_pool_create("session_pool",
+                                    MAX_SESSIONS * 2,
+                                    session_size,
+                                    POOL_CACHE_SIZE,
+                                    0,
+                                    socket_id);
+
+	session_priv_pool = session_pool;
+
+    #endif
+
     /* Configure the crypto device. */
     struct rte_cryptodev_config conf = {
         .nb_queue_pairs = 1,
         .socket_id = socket_id
     };
+
     struct rte_cryptodev_qp_conf qp_conf = {
-        .nb_descriptors = 2048
+        .nb_descriptors = 2048,
+        .mp_session = session_pool,
+        .mp_session_private = session_priv_pool
     };
 
     if (rte_cryptodev_configure(cdev_id, &conf) < 0)
         rte_exit(EXIT_FAILURE, "Failed to configure cryptodev %u", cdev_id);
 
-    if (rte_cryptodev_queue_pair_setup(cdev_id, 0, &qp_conf,
-                            socket_id, session_pool) < 0)
+    if (rte_cryptodev_queue_pair_setup(cdev_id, 0, &qp_conf, socket_id) < 0)
         rte_exit(EXIT_FAILURE, "Failed to setup queue pair\n");
 
     if (rte_cryptodev_start(cdev_id) < 0)
@@ -721,7 +904,7 @@ using one of the crypto PMDs available in DPDK.
         rte_exit(EXIT_FAILURE, "Session could not be created\n");
 
     if (rte_cryptodev_sym_session_init(cdev_id, session,
-                    &cipher_xform, session_pool) < 0)
+                    &cipher_xform, session_priv_pool) < 0)
         rte_exit(EXIT_FAILURE, "Session could not be initialized "
                     "for the crypto device\n");
 
@@ -833,7 +1016,15 @@ private asymmetric session data. Once this is done, session should be freed usin
 
 Asymmetric Sessionless Support
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Currently asymmetric crypto framework does not support sessionless.
+
+Asymmetric crypto framework supports session-less operations as well.
+
+Fields that should be set by user are:
+
+Member xform of struct rte_crypto_asym_op should point to the user created rte_crypto_asym_xform.
+Note that rte_crypto_asym_xform should be immutable for the lifetime of associated crypto_op.
+
+Member sess_type of rte_crypto_op should also be set to RTE_CRYPTO_OP_SESSIONLESS.
 
 Transforms and Transform Chaining
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -841,7 +1032,10 @@ Transforms and Transform Chaining
 Asymmetric Crypto transforms (``rte_crypto_asym_xform``) are the mechanism used
 to specify the details of the asymmetric Crypto operation. Next pointer within
 xform allows transform to be chained together. Also it is important to note that
-the order in which the transforms are passed indicates the order of the chaining.
+the order in which the transforms are passed indicates the order of the chaining. Allocation
+of the xform structure is in the application domain. To allow future API extensions in a
+backwardly compatible manner, e.g. addition of a new parameter, the application should
+zero the full xform struct before populating it.
 
 Not all asymmetric crypto xforms are supported for chaining. Currently supported
 asymmetric crypto chaining is Diffie-Hellman private key generation followed by
@@ -1043,4 +1237,4 @@ Asymmetric Crypto Device API
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The cryptodev Library API is described in the
-`DPDK API Reference <http://doc.dpdk.org/api/>`_
+`DPDK API Reference <https://doc.dpdk.org/api/>`_

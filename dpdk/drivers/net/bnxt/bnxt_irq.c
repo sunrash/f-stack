@@ -9,7 +9,6 @@
 #include <rte_malloc.h>
 
 #include "bnxt.h"
-#include "bnxt_cpr.h"
 #include "bnxt_irq.h"
 #include "bnxt_ring.h"
 #include "hsi_struct_def_dpdk.h"
@@ -18,35 +17,52 @@
  * Interrupts
  */
 
-static void bnxt_int_handler(void *param)
+void bnxt_int_handler(void *param)
 {
 	struct rte_eth_dev *eth_dev = (struct rte_eth_dev *)param;
 	struct bnxt *bp = eth_dev->data->dev_private;
-	struct bnxt_cp_ring_info *cpr = bp->def_cp_ring;
+	uint32_t cons, raw_cons, cp_ring_size;
+	struct bnxt_cp_ring_info *cpr;
 	struct cmpl_base *cmp;
-	uint32_t raw_cons;
-	uint32_t cons;
 
+
+	if (bp == NULL)
+		return;
+	cpr = bp->async_cp_ring;
 	if (cpr == NULL)
 		return;
 
 	raw_cons = cpr->cp_raw_cons;
+	pthread_mutex_lock(&bp->def_cp_lock);
 	while (1) {
-		if (!cpr || !cpr->cp_ring_struct || !cpr->cp_doorbell)
+		if (!cpr || !cpr->cp_ring_struct || !cpr->cp_db.doorbell) {
+			pthread_mutex_unlock(&bp->def_cp_lock);
 			return;
+		}
 
+		if (is_bnxt_in_error(bp)) {
+			pthread_mutex_unlock(&bp->def_cp_lock);
+			return;
+		}
+
+		cp_ring_size = cpr->cp_ring_struct->ring_size;
 		cons = RING_CMP(cpr->cp_ring_struct, raw_cons);
 		cmp = &cpr->cp_desc_ring[cons];
 
-		if (!CMP_VALID(cmp, raw_cons, cpr->cp_ring_struct))
+		if (!bnxt_cpr_cmp_valid(cmp, raw_cons, cp_ring_size))
 			break;
 
 		bnxt_event_hwrm_resp_handler(bp, cmp);
 		raw_cons = NEXT_RAW_CMP(raw_cons);
-	};
+	}
 
 	cpr->cp_raw_cons = raw_cons;
-	B_CP_DB_REARM(cpr, cpr->cp_raw_cons);
+	if (BNXT_HAS_NQ(bp))
+		bnxt_db_nq_arm(cpr);
+	else
+		B_CP_DB_REARM(cpr, cpr->cp_raw_cons);
+
+	pthread_mutex_unlock(&bp->def_cp_lock);
 }
 
 int bnxt_free_int(struct bnxt *bp)
@@ -92,19 +108,38 @@ int bnxt_free_int(struct bnxt *bp)
 
 void bnxt_disable_int(struct bnxt *bp)
 {
-	struct bnxt_cp_ring_info *cpr = bp->def_cp_ring;
+	struct bnxt_cp_ring_info *cpr = bp->async_cp_ring;
+
+	if (BNXT_NUM_ASYNC_CPR(bp) == 0)
+		return;
+
+	if (is_bnxt_in_error(bp))
+		return;
+
+	if (!cpr || !cpr->cp_db.doorbell)
+		return;
 
 	/* Only the default completion ring */
-	if (cpr != NULL && cpr->cp_doorbell != NULL)
+	if (BNXT_HAS_NQ(bp))
+		bnxt_db_nq(cpr);
+	else
 		B_CP_DB_DISARM(cpr);
 }
 
 void bnxt_enable_int(struct bnxt *bp)
 {
-	struct bnxt_cp_ring_info *cpr = bp->def_cp_ring;
+	struct bnxt_cp_ring_info *cpr = bp->async_cp_ring;
+
+	if (BNXT_NUM_ASYNC_CPR(bp) == 0)
+		return;
+
+	if (!cpr || !cpr->cp_db.doorbell)
+		return;
 
 	/* Only the default completion ring */
-	if (cpr != NULL && cpr->cp_doorbell != NULL)
+	if (BNXT_HAS_NQ(bp))
+		bnxt_db_nq_arm(cpr);
+	else
 		B_CP_DB_ARM(cpr);
 }
 
@@ -112,7 +147,7 @@ int bnxt_setup_int(struct bnxt *bp)
 {
 	uint16_t total_vecs;
 	const int len = sizeof(bp->irq_tbl[0].name);
-	int i, rc = 0;
+	int i;
 
 	/* DPDK host only supports 1 MSI-X vector */
 	total_vecs = 1;
@@ -126,14 +161,11 @@ int bnxt_setup_int(struct bnxt *bp)
 			bp->irq_tbl[i].handler = bnxt_int_handler;
 		}
 	} else {
-		rc = -ENOMEM;
-		goto setup_exit;
+		PMD_DRV_LOG(ERR, "bnxt_irq_tbl setup failed\n");
+		return -ENOMEM;
 	}
-	return 0;
 
-setup_exit:
-	PMD_DRV_LOG(ERR, "bnxt_irq_tbl setup failed\n");
-	return rc;
+	return 0;
 }
 
 int bnxt_request_int(struct bnxt *bp)
@@ -152,6 +184,14 @@ int bnxt_request_int(struct bnxt *bp)
 		if (!rc)
 			irq->requested = 1;
 	}
+
+#ifdef RTE_EXEC_ENV_FREEBSD
+	/**
+	 * In FreeBSD OS, nic_uio does not support interrupts and
+	 * interrupt register callback will fail.
+	 */
+	rc = 0;
+#endif
 
 	return rc;
 }

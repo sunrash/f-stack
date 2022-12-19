@@ -231,7 +231,7 @@ EAL
 
 * **igb_uio: Fixed possible mmap failure for Linux >= 4.5.**
 
-  The mmaping of the iomem range of the PCI device fails for kernels that
+  The mmapping of the iomem range of the PCI device fails for kernels that
   enabled the ``CONFIG_IO_STRICT_DEVMEM`` option. The error seen by the
   user is as similar to the following::
 
@@ -550,4 +550,3 @@ Tested OSes
 - Ubuntu 15.10
 - Ubuntu 16.04 LTS
 - Wind River Linux 8
-

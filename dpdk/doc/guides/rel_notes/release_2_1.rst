@@ -70,7 +70,7 @@ New Features
   * In UIO, the RX interrupt shares the same vector with other
     interrupts. When the RX interrupt and LSC interrupt are both enabled, only
     the former is available.
-  * RX interrupt is only implemented for the linuxapp target.
+  * RX interrupt is only implemented for the linux target.
   * The feature is only currently enabled for tow PMDs: ixgbe and igb.
 
 
@@ -243,7 +243,7 @@ New Features
 * **Added fm10k jumbo frame support.**
 
   Added support for jumbo frame less than 15K in both VF and PF functions in the
-  fm10k pmd.
+  fm10k PMD.
 
 
 * **Added fm10k mac vlan filtering support.**
@@ -673,7 +673,7 @@ Resolved Issues
   value 0.
 
 
-  Fixes: 40b966a211ab ("ivshmem: library changes for mmaping using ivshmem")
+  Fixes: 40b966a211ab ("ivshmem: library changes for mmapping using ivshmem")
 
 
 * **ixgbe/base: Fix SFP probing.**

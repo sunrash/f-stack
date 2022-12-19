@@ -35,7 +35,7 @@ struct vhost_dev {
 	/**< Number of memory regions for gpa to hpa translation. */
 	uint32_t nregions_hpa;
 	/**< Device MAC address (Obtained on first TX packet). */
-	struct ether_addr mac_address;
+	struct rte_ether_addr mac_address;
 	/**< RX VMDQ queue number. */
 	uint16_t vmdq_rx_q;
 	/**< Vlan tag assigned to the pool */
@@ -51,6 +51,7 @@ struct vhost_dev {
 	uint64_t features;
 	size_t hdr_len;
 	uint16_t nr_vrings;
+	uint16_t nr_async_pkts;
 	struct rte_vhost_memory *mem;
 	struct device_statistics stats;
 	TAILQ_ENTRY(vhost_dev) global_vdev_entry;

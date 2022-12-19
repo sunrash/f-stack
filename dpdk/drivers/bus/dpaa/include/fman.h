@@ -2,6 +2,7 @@
  *
  * Copyright 2010-2012 Freescale Semiconductor, Inc.
  * All rights reserved.
+ * Copyright 2019-2020 NXP
  *
  */
 
@@ -15,6 +16,7 @@
 #include <rte_ether.h>
 
 #include <compat.h>
+#include <dpaa_list.h>
 
 #ifndef FMAN_DEVICE_PATH
 #define FMAN_DEVICE_PATH "/dev/mem"
@@ -71,6 +73,7 @@ enum fman_mac_type {
 	fman_offline = 0,
 	fman_mac_1g,
 	fman_mac_10g,
+	fman_mac_2_5g,
 };
 
 struct mac_addr {
@@ -223,6 +226,8 @@ struct memac_regs {
 	uint32_t thm;			/**< 0x37C tx messages counter */
 };
 
+#define BMI_PORT_CFG_FDOVR 0x02000000
+
 struct rx_bmi_regs {
 	uint32_t fmbm_rcfg;		/**< Rx Configuration */
 	uint32_t fmbm_rst;		/**< Rx Status */
@@ -314,9 +319,14 @@ struct fman_if {
 	/* The index of this MAC (within the Fman it belongs to) */
 	uint8_t mac_idx;
 	/* The MAC address */
-	struct ether_addr mac_addr;
+	struct rte_ether_addr mac_addr;
 	/* The Qman channel to schedule Tx FQs to */
 	u16 tx_channel_id;
+
+	uint8_t base_profile_id;
+	uint8_t num_profiles;
+
+	uint8_t is_shared_mac;
 	/* The hard-coded FQIDs for this interface. Note: this doesn't cover
 	 * the PCD nor the "Rx default" FQIDs, which are configured via FMC
 	 * and its XML-based configuration.
@@ -359,6 +369,7 @@ struct fman_if_ic_params {
  */
 struct __fman_if {
 	struct fman_if __if;
+	char node_name[IF_NAME_MAX_LEN];
 	char node_path[PATH_MAX];
 	uint64_t regs_size;
 	void *ccsr_map;

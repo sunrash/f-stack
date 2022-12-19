@@ -16,6 +16,7 @@
 
 #include "rte_eventdev.h"
 #include "rte_eventdev_pmd.h"
+#include "rte_eventdev_trace.h"
 #include "rte_event_crypto_adapter.h"
 
 #define BATCH_SIZE 32
@@ -195,7 +196,7 @@ eca_default_config_cb(uint8_t id, uint8_t dev_id,
 	return ret;
 }
 
-int __rte_experimental
+int
 rte_event_crypto_adapter_create_ext(uint8_t id, uint8_t dev_id,
 				rte_event_crypto_adapter_conf_cb conf_cb,
 				enum rte_event_crypto_adapter_mode mode,
@@ -240,6 +241,7 @@ rte_event_crypto_adapter_create_ext(uint8_t id, uint8_t dev_id,
 	if (ret < 0) {
 		RTE_EDEV_LOG_ERR("Failed to get info for eventdev %d: %s!",
 				 dev_id, dev_info.driver_name);
+		rte_free(adapter);
 		return ret;
 	}
 
@@ -267,11 +269,13 @@ rte_event_crypto_adapter_create_ext(uint8_t id, uint8_t dev_id,
 
 	event_crypto_adapter[id] = adapter;
 
+	rte_eventdev_trace_crypto_adapter_create(id, dev_id, adapter, conf_arg,
+		mode);
 	return 0;
 }
 
 
-int __rte_experimental
+int
 rte_event_crypto_adapter_create(uint8_t id, uint8_t dev_id,
 				struct rte_event_port_conf *port_config,
 				enum rte_event_crypto_adapter_mode mode)
@@ -297,7 +301,7 @@ rte_event_crypto_adapter_create(uint8_t id, uint8_t dev_id,
 	return ret;
 }
 
-int __rte_experimental
+int
 rte_event_crypto_adapter_free(uint8_t id)
 {
 	struct rte_event_crypto_adapter *adapter;
@@ -314,6 +318,7 @@ rte_event_crypto_adapter_free(uint8_t id)
 		return -EBUSY;
 	}
 
+	rte_eventdev_trace_crypto_adapter_free(id, adapter);
 	if (adapter->default_cb_arg)
 		rte_free(adapter->conf_arg);
 	rte_free(adapter->cdevs);
@@ -762,7 +767,7 @@ eca_add_queue_pair(struct rte_event_crypto_adapter *adapter,
 	return 0;
 }
 
-int __rte_experimental
+int
 rte_event_crypto_adapter_queue_pair_add(uint8_t id,
 			uint8_t cdev_id,
 			int32_t queue_pair_id,
@@ -856,6 +861,7 @@ rte_event_crypto_adapter_queue_pair_add(uint8_t id,
 	 *          b. OP_NEW mode -> SW Dequeue
 	 */
 	if ((cap & RTE_EVENT_CRYPTO_ADAPTER_CAP_INTERNAL_PORT_OP_NEW &&
+	     !(cap & RTE_EVENT_CRYPTO_ADAPTER_CAP_INTERNAL_PORT_OP_FWD) &&
 	     adapter->mode == RTE_EVENT_CRYPTO_ADAPTER_OP_FORWARD) ||
 	     (!(cap & RTE_EVENT_CRYPTO_ADAPTER_CAP_INTERNAL_PORT_OP_NEW) &&
 	      !(cap & RTE_EVENT_CRYPTO_ADAPTER_CAP_INTERNAL_PORT_OP_FWD) &&
@@ -874,10 +880,12 @@ rte_event_crypto_adapter_queue_pair_add(uint8_t id,
 		rte_service_component_runstate_set(adapter->service_id, 1);
 	}
 
+	rte_eventdev_trace_crypto_adapter_queue_pair_add(id, cdev_id, event,
+		queue_pair_id);
 	return 0;
 }
 
-int __rte_experimental
+int
 rte_event_crypto_adapter_queue_pair_del(uint8_t id, uint8_t cdev_id,
 					int32_t queue_pair_id)
 {
@@ -959,6 +967,8 @@ rte_event_crypto_adapter_queue_pair_del(uint8_t id, uint8_t cdev_id,
 				adapter->nb_qps);
 	}
 
+	rte_eventdev_trace_crypto_adapter_queue_pair_del(id, cdev_id,
+		queue_pair_id, ret);
 	return ret;
 }
 
@@ -1004,7 +1014,7 @@ eca_adapter_ctrl(uint8_t id, int start)
 	return 0;
 }
 
-int __rte_experimental
+int
 rte_event_crypto_adapter_start(uint8_t id)
 {
 	struct rte_event_crypto_adapter *adapter;
@@ -1014,16 +1024,18 @@ rte_event_crypto_adapter_start(uint8_t id)
 	if (adapter == NULL)
 		return -EINVAL;
 
+	rte_eventdev_trace_crypto_adapter_start(id, adapter);
 	return eca_adapter_ctrl(id, 1);
 }
 
-int __rte_experimental
+int
 rte_event_crypto_adapter_stop(uint8_t id)
 {
+	rte_eventdev_trace_crypto_adapter_stop(id);
 	return eca_adapter_ctrl(id, 0);
 }
 
-int __rte_experimental
+int
 rte_event_crypto_adapter_stats_get(uint8_t id,
 				struct rte_event_crypto_adapter_stats *stats)
 {
@@ -1068,7 +1080,7 @@ rte_event_crypto_adapter_stats_get(uint8_t id,
 	return 0;
 }
 
-int __rte_experimental
+int
 rte_event_crypto_adapter_stats_reset(uint8_t id)
 {
 	struct rte_event_crypto_adapter *adapter;
@@ -1096,7 +1108,7 @@ rte_event_crypto_adapter_stats_reset(uint8_t id)
 	return 0;
 }
 
-int __rte_experimental
+int
 rte_event_crypto_adapter_service_id_get(uint8_t id, uint32_t *service_id)
 {
 	struct rte_event_crypto_adapter *adapter;
@@ -1113,7 +1125,7 @@ rte_event_crypto_adapter_service_id_get(uint8_t id, uint32_t *service_id)
 	return adapter->service_inited ? 0 : -ESRCH;
 }
 
-int __rte_experimental
+int
 rte_event_crypto_adapter_event_port_get(uint8_t id, uint8_t *event_port_id)
 {
 	struct rte_event_crypto_adapter *adapter;

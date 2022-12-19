@@ -20,16 +20,20 @@
 #include <rte_log.h>
 #include <rte_string_fns.h>
 #include <rte_malloc.h>
+#include <rte_net.h>
 #include <rte_vhost.h>
 #include <rte_ip.h>
 #include <rte_tcp.h>
 #include <rte_pause.h>
 
+#include "ioat.h"
 #include "main.h"
 
 #ifndef MAX_QUEUES
 #define MAX_QUEUES 128
 #endif
+
+#define NUM_MBUFS_DEFAULT 0x24000
 
 /* the maximum number of external ports supported */
 #define MAX_SUP_PORTS 1
@@ -55,11 +59,11 @@
 
 #define INVALID_PORT_ID 0xFF
 
-/* Max number of devices. Limited by vmdq. */
-#define MAX_DEVICES 64
-
 /* Maximum long option length for option parsing. */
 #define MAX_LONG_OPT_SZ 64
+
+/* number of mbufs in all pools - if specified on command-line. */
+static int total_num_mbufs = NUM_MBUFS_DEFAULT;
 
 /* mask of enabled ports */
 static uint32_t enabled_port_mask = 0;
@@ -95,9 +99,12 @@ static uint32_t enable_tx_csum;
 static uint32_t enable_tso;
 
 static int client_mode;
-static int dequeue_zero_copy;
 
 static int builtin_net_driver;
+
+static int async_vhost_driver;
+
+static char dma_type[MAX_LONG_OPT_SZ];
 
 /* Specify timeout (in useconds) between retries on RX. */
 static uint32_t burst_rx_delay_time = BURST_RX_WAIT_US;
@@ -108,7 +115,7 @@ static uint32_t burst_rx_retry_num = BURST_RX_RETRIES;
 static char *socket_files;
 static int nb_sockets;
 
-/* empty vmdq configuration structure. Filled in programatically */
+/* empty VMDq configuration structure. Filled in programmatically */
 static struct rte_eth_conf vmdq_conf_default = {
 	.rxmode = {
 		.mq_mode        = ETH_MQ_RX_VMDQ_ONLY,
@@ -116,7 +123,7 @@ static struct rte_eth_conf vmdq_conf_default = {
 		/*
 		 * VLAN strip is necessary for 1G NIC such as I350,
 		 * this fixes bug of ipv4 forwarding in guest can't
-		 * forward pakets from one virtio dev to another virtio dev.
+		 * forward packets from one virtio dev to another virtio dev.
 		 */
 		.offloads = DEV_RX_OFFLOAD_VLAN_STRIP,
 	},
@@ -164,7 +171,7 @@ const uint16_t vlan_tags[] = {
 };
 
 /* ethernet addresses of ports */
-static struct ether_addr vmdq_ports_eth_addr[RTE_MAX_ETHPORTS];
+static struct rte_ether_addr vmdq_ports_eth_addr[RTE_MAX_ETHPORTS];
 
 static struct vhost_dev_tailq_list vhost_dev_list =
 	TAILQ_HEAD_INITIALIZER(vhost_dev_list);
@@ -184,6 +191,15 @@ struct mbuf_table lcore_tx_queue[RTE_MAX_LCORE];
 #define MBUF_TABLE_DRAIN_TSC	((rte_get_tsc_hz() + US_PER_S - 1) \
 				 / US_PER_S * BURST_TX_DRAIN_US)
 #define VLAN_HLEN       4
+
+static inline int
+open_dma(const char *value)
+{
+	if (strncmp(dma_type, "ioat", 4) == 0)
+		return open_ioat(value);
+
+	return -1;
+}
 
 /*
  * Builds up the correct configuration for VMDQ VLAN pool map
@@ -215,21 +231,6 @@ get_eth_conf(struct rte_eth_conf *eth_conf, uint32_t num_devices)
 }
 
 /*
- * Validate the device number according to the max pool number gotten form
- * dev_info. If the device number is invalid, give the error message and
- * return -1. Each device must have its own pool.
- */
-static inline int
-validate_num_devices(uint32_t max_nb_devices)
-{
-	if (num_devices > max_nb_devices) {
-		RTE_LOG(ERR, VHOST_PORT, "invalid number of devices\n");
-		return -1;
-	}
-	return 0;
-}
-
-/*
  * Initialises a given port using global settings and with the rx buffers
  * coming from the mbuf_pool passed as parameter
  */
@@ -246,7 +247,18 @@ port_init(uint16_t port)
 	uint16_t q;
 
 	/* The max pool number from dev_info will be used to validate the pool number specified in cmd line */
-	rte_eth_dev_info_get (port, &dev_info);
+	retval = rte_eth_dev_info_get(port, &dev_info);
+	if (retval != 0) {
+		RTE_LOG(ERR, VHOST_PORT,
+			"Error during getting device (port %u) info: %s\n",
+			port, strerror(-retval));
+
+		return retval;
+	}
+	if (dev_info.max_vmdq_pools == 0) {
+		RTE_LOG(ERR, VHOST_PORT, "Failed to get VMDq info.\n");
+		return -1;
+	}
 
 	rxconf = &dev_info.default_rxconf;
 	txconf = &dev_info.default_txconf;
@@ -258,21 +270,7 @@ port_init(uint16_t port)
 	rx_ring_size = RTE_TEST_RX_DESC_DEFAULT;
 	tx_ring_size = RTE_TEST_TX_DESC_DEFAULT;
 
-	/*
-	 * When dequeue zero copy is enabled, guest Tx used vring will be
-	 * updated only when corresponding mbuf is freed. Thus, the nb_tx_desc
-	 * (tx_ring_size here) must be small enough so that the driver will
-	 * hit the free threshold easily and free mbufs timely. Otherwise,
-	 * guest Tx vring would be starved.
-	 */
-	if (dequeue_zero_copy)
-		tx_ring_size = 64;
-
 	tx_rings = (uint16_t)rte_lcore_count();
-
-	retval = validate_num_devices(MAX_DEVICES);
-	if (retval < 0)
-		return retval;
 
 	/* Get port configuration. */
 	retval = get_eth_conf(&port_conf, num_devices);
@@ -351,10 +349,24 @@ port_init(uint16_t port)
 		return retval;
 	}
 
-	if (promiscuous)
-		rte_eth_promiscuous_enable(port);
+	if (promiscuous) {
+		retval = rte_eth_promiscuous_enable(port);
+		if (retval != 0) {
+			RTE_LOG(ERR, VHOST_PORT,
+				"Failed to enable promiscuous mode on port %u: %s\n",
+				port, rte_strerror(-retval));
+			return retval;
+		}
+	}
 
-	rte_eth_macaddr_get(port, &vmdq_ports_eth_addr[port]);
+	retval = rte_eth_macaddr_get(port, &vmdq_ports_eth_addr[port]);
+	if (retval < 0) {
+		RTE_LOG(ERR, VHOST_PORT,
+			"Failed to get MAC address on port %u: %s\n",
+			port, rte_strerror(-retval));
+		return retval;
+	}
+
 	RTE_LOG(INFO, VHOST_PORT, "Max virtio devices supported: %u\n", num_devices);
 	RTE_LOG(INFO, VHOST_PORT, "Port %u MAC: %02"PRIx8" %02"PRIx8" %02"PRIx8
 			" %02"PRIx8" %02"PRIx8" %02"PRIx8"\n",
@@ -388,7 +400,7 @@ us_vhost_parse_socket_path(const char *q_arg)
 		return -1;
 	}
 
-	snprintf(socket_files + nb_sockets * PATH_MAX, PATH_MAX, "%s", q_arg);
+	strlcpy(socket_files + nb_sockets * PATH_MAX, q_arg, PATH_MAX);
 	nb_sockets++;
 
 	return 0;
@@ -408,10 +420,7 @@ parse_portmask(const char *portmask)
 	/* parse hexadecimal string */
 	pm = strtoul(portmask, &end, 16);
 	if ((portmask[0] == '\0') || (end == NULL) || (*end != '\0') || (errno != 0))
-		return -1;
-
-	if (pm == 0)
-		return -1;
+		return 0;
 
 	return pm;
 
@@ -453,7 +462,7 @@ us_vhost_usage(const char *prgname)
 	"		--nb-devices ND\n"
 	"		-p PORTMASK: Set mask for ports to be used by application\n"
 	"		--vm2vm [0|1|2]: disable/software(default)/hardware vm2vm comms\n"
-	"		--rx-retry [0|1]: disable/enable(default) retries on rx. Enable retry if destintation queue is full\n"
+	"		--rx-retry [0|1]: disable/enable(default) retries on Rx. Enable retry if destination queue is full\n"
 	"		--rx-retry-delay [0-N]: timeout(in usecond) between retries on RX. This makes effect only if retries on rx enabled\n"
 	"		--rx-retry-num [0-N]: the number of retries on rx. This makes effect only if retries on rx enabled\n"
 	"		--mergeable [0|1]: disable(default)/enable RX mergeable buffers\n"
@@ -462,7 +471,9 @@ us_vhost_usage(const char *prgname)
 	"		--tx-csum [0|1] disable/enable TX checksum offload.\n"
 	"		--tso [0|1] disable/enable TCP segment offload.\n"
 	"		--client register a vhost-user socket as client mode.\n"
-	"		--dequeue-zero-copy enables dequeue zero copy\n",
+	"		--dma-type register dma type for your vhost async driver. For example \"ioat\" for now.\n"
+	"		--dmas register dma channel for specific vhost device.\n"
+	"		--total-num-mbufs [0-N] set the number of mbufs to be allocated in mbuf pools, the default value is 147456.\n",
 	       prgname);
 }
 
@@ -487,9 +498,10 @@ us_vhost_parse_args(int argc, char **argv)
 		{"tx-csum", required_argument, NULL, 0},
 		{"tso", required_argument, NULL, 0},
 		{"client", no_argument, &client_mode, 1},
-		{"dequeue-zero-copy", no_argument, &dequeue_zero_copy, 1},
 		{"builtin-net-driver", no_argument, &builtin_net_driver, 1},
-		{NULL, 0, 0, 0},
+		{"dma-type", required_argument, NULL, 0},
+		{"dmas", required_argument, NULL, 0},
+		{"total-num-mbufs", required_argument, NULL, 0},
 	};
 
 	/* Parse command line */
@@ -631,6 +643,43 @@ us_vhost_parse_args(int argc, char **argv)
 				}
 			}
 
+			if (!strncmp(long_option[option_index].name,
+						"dma-type", MAX_LONG_OPT_SZ)) {
+				if (strlen(optarg) >= MAX_LONG_OPT_SZ) {
+					RTE_LOG(INFO, VHOST_CONFIG,
+						"Wrong DMA type\n");
+					us_vhost_usage(prgname);
+					return -1;
+				}
+				strcpy(dma_type, optarg);
+			}
+
+			if (!strncmp(long_option[option_index].name,
+						"dmas", MAX_LONG_OPT_SZ)) {
+				if (open_dma(optarg) == -1) {
+					RTE_LOG(INFO, VHOST_CONFIG,
+						"Wrong DMA args\n");
+					us_vhost_usage(prgname);
+					return -1;
+				}
+				async_vhost_driver = 1;
+			}
+
+
+			if (!strncmp(long_option[option_index].name,
+						"total-num-mbufs", MAX_LONG_OPT_SZ)) {
+				ret = parse_num_opt(optarg, INT32_MAX);
+				if (ret == -1) {
+					RTE_LOG(INFO, VHOST_CONFIG,
+						"Invalid argument for total-num-mbufs [0..N]\n");
+					us_vhost_usage(prgname);
+					return -1;
+				}
+
+				if (total_num_mbufs < ret)
+					total_num_mbufs = ret;
+			}
+
 			break;
 
 			/* Invalid option - print options. */
@@ -682,13 +731,13 @@ static unsigned check_ports_num(unsigned nb_ports)
 }
 
 static __rte_always_inline struct vhost_dev *
-find_vhost_dev(struct ether_addr *mac)
+find_vhost_dev(struct rte_ether_addr *mac)
 {
 	struct vhost_dev *vdev;
 
 	TAILQ_FOREACH(vdev, &vhost_dev_list, global_vdev_entry) {
 		if (vdev->ready == DEVICE_RX &&
-		    is_same_ether_addr(mac, &vdev->mac_address))
+		    rte_is_same_ether_addr(mac, &vdev->mac_address))
 			return vdev;
 	}
 
@@ -702,11 +751,11 @@ find_vhost_dev(struct ether_addr *mac)
 static int
 link_vmdq(struct vhost_dev *vdev, struct rte_mbuf *m)
 {
-	struct ether_hdr *pkt_hdr;
+	struct rte_ether_hdr *pkt_hdr;
 	int i, ret;
 
 	/* Learn MAC address of guest device from packet */
-	pkt_hdr = rte_pktmbuf_mtod(m, struct ether_hdr *);
+	pkt_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
 	if (find_vhost_dev(&pkt_hdr->s_addr)) {
 		RTE_LOG(ERR, VHOST_DATA,
@@ -715,7 +764,7 @@ link_vmdq(struct vhost_dev *vdev, struct rte_mbuf *m)
 		return -1;
 	}
 
-	for (i = 0; i < ETHER_ADDR_LEN; i++)
+	for (i = 0; i < RTE_ETHER_ADDR_LEN; i++)
 		vdev->mac_address.addr_bytes[i] = pkt_hdr->s_addr.addr_bytes[i];
 
 	/* vlan_tag currently uses the device_id. */
@@ -786,9 +835,22 @@ virtio_xmit(struct vhost_dev *dst_vdev, struct vhost_dev *src_vdev,
 	    struct rte_mbuf *m)
 {
 	uint16_t ret;
+	struct rte_mbuf *m_cpl[1];
 
 	if (builtin_net_driver) {
 		ret = vs_enqueue_pkts(dst_vdev, VIRTIO_RXQ, &m, 1);
+	} else if (async_vhost_driver) {
+		ret = rte_vhost_submit_enqueue_burst(dst_vdev->vid, VIRTIO_RXQ,
+						&m, 1);
+
+		if (likely(ret))
+			dst_vdev->nr_async_pkts++;
+
+		while (likely(dst_vdev->nr_async_pkts)) {
+			if (rte_vhost_poll_enqueue_completed(dst_vdev->vid,
+					VIRTIO_RXQ, m_cpl, 1))
+				dst_vdev->nr_async_pkts--;
+		}
 	} else {
 		ret = rte_vhost_enqueue_burst(dst_vdev->vid, VIRTIO_RXQ, &m, 1);
 	}
@@ -808,10 +870,10 @@ virtio_xmit(struct vhost_dev *dst_vdev, struct vhost_dev *src_vdev,
 static __rte_always_inline int
 virtio_tx_local(struct vhost_dev *vdev, struct rte_mbuf *m)
 {
-	struct ether_hdr *pkt_hdr;
+	struct rte_ether_hdr *pkt_hdr;
 	struct vhost_dev *dst_vdev;
 
-	pkt_hdr = rte_pktmbuf_mtod(m, struct ether_hdr *);
+	pkt_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
 	dst_vdev = find_vhost_dev(&pkt_hdr->d_addr);
 	if (!dst_vdev)
@@ -846,7 +908,8 @@ find_local_dest(struct vhost_dev *vdev, struct rte_mbuf *m,
 	uint32_t *offset, uint16_t *vlan_tag)
 {
 	struct vhost_dev *dst_vdev;
-	struct ether_hdr *pkt_hdr = rte_pktmbuf_mtod(m, struct ether_hdr *);
+	struct rte_ether_hdr *pkt_hdr =
+		rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
 	dst_vdev = find_vhost_dev(&pkt_hdr->d_addr);
 	if (!dst_vdev)
@@ -874,32 +937,34 @@ find_local_dest(struct vhost_dev *vdev, struct rte_mbuf *m,
 	return 0;
 }
 
-static uint16_t
-get_psd_sum(void *l3_hdr, uint64_t ol_flags)
-{
-	if (ol_flags & PKT_TX_IPV4)
-		return rte_ipv4_phdr_cksum(l3_hdr, ol_flags);
-	else /* assume ethertype == ETHER_TYPE_IPv6 */
-		return rte_ipv6_phdr_cksum(l3_hdr, ol_flags);
-}
-
 static void virtio_tx_offload(struct rte_mbuf *m)
 {
+	struct rte_net_hdr_lens hdr_lens;
+	struct rte_ipv4_hdr *ipv4_hdr;
+	struct rte_tcp_hdr *tcp_hdr;
+	uint32_t ptype;
 	void *l3_hdr;
-	struct ipv4_hdr *ipv4_hdr = NULL;
-	struct tcp_hdr *tcp_hdr = NULL;
-	struct ether_hdr *eth_hdr = rte_pktmbuf_mtod(m, struct ether_hdr *);
 
-	l3_hdr = (char *)eth_hdr + m->l2_len;
+	ptype = rte_net_get_ptype(m, &hdr_lens, RTE_PTYPE_ALL_MASK);
+	m->l2_len = hdr_lens.l2_len;
+	m->l3_len = hdr_lens.l3_len;
+	m->l4_len = hdr_lens.l4_len;
 
-	if (m->ol_flags & PKT_TX_IPV4) {
+	l3_hdr = rte_pktmbuf_mtod_offset(m, void *, m->l2_len);
+	tcp_hdr = rte_pktmbuf_mtod_offset(m, struct rte_tcp_hdr *,
+		m->l2_len + m->l3_len);
+
+	m->ol_flags |= PKT_TX_TCP_SEG;
+	if ((ptype & RTE_PTYPE_L3_MASK) == RTE_PTYPE_L3_IPV4) {
+		m->ol_flags |= PKT_TX_IPV4;
+		m->ol_flags |= PKT_TX_IP_CKSUM;
 		ipv4_hdr = l3_hdr;
 		ipv4_hdr->hdr_checksum = 0;
-		m->ol_flags |= PKT_TX_IP_CKSUM;
+		tcp_hdr->cksum = rte_ipv4_phdr_cksum(l3_hdr, m->ol_flags);
+	} else { /* assume ethertype == RTE_ETHER_TYPE_IPV6 */
+		m->ol_flags |= PKT_TX_IPV6;
+		tcp_hdr->cksum = rte_ipv6_phdr_cksum(l3_hdr, m->ol_flags);
 	}
-
-	tcp_hdr = (struct tcp_hdr *)((char *)l3_hdr + m->l3_len);
-	tcp_hdr->cksum = get_psd_sum(l3_hdr, m->ol_flags);
 }
 
 static inline void
@@ -932,11 +997,11 @@ virtio_tx_route(struct vhost_dev *vdev, struct rte_mbuf *m, uint16_t vlan_tag)
 	struct mbuf_table *tx_q;
 	unsigned offset = 0;
 	const uint16_t lcore_id = rte_lcore_id();
-	struct ether_hdr *nh;
+	struct rte_ether_hdr *nh;
 
 
-	nh = rte_pktmbuf_mtod(m, struct ether_hdr *);
-	if (unlikely(is_broadcast_ether_addr(&nh->d_addr))) {
+	nh = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
+	if (unlikely(rte_is_broadcast_ether_addr(&nh->d_addr))) {
 		struct vhost_dev *vdev2;
 
 		TAILQ_FOREACH(vdev2, &vhost_dev_list, global_vdev_entry) {
@@ -968,10 +1033,10 @@ queue2nic:
 	/*Add packet to the port tx queue*/
 	tx_q = &lcore_tx_queue[lcore_id];
 
-	nh = rte_pktmbuf_mtod(m, struct ether_hdr *);
-	if (unlikely(nh->ether_type == rte_cpu_to_be_16(ETHER_TYPE_VLAN))) {
+	nh = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
+	if (unlikely(nh->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_VLAN))) {
 		/* Guest has inserted the vlan tag. */
-		struct vlan_hdr *vh = (struct vlan_hdr *) (nh + 1);
+		struct rte_vlan_hdr *vh = (struct rte_vlan_hdr *) (nh + 1);
 		uint16_t vlan_tag_be = rte_cpu_to_be_16(vlan_tag);
 		if ((vm2vm_mode == VM2VM_HARDWARE) &&
 			(vh->vlan_tci != vlan_tag_be))
@@ -1001,7 +1066,7 @@ queue2nic:
 		m->vlan_tci = vlan_tag;
 	}
 
-	if (m->ol_flags & PKT_TX_TCP_SEG)
+	if (m->ol_flags & PKT_RX_LRO)
 		virtio_tx_offload(m);
 
 	tx_q->m_table[tx_q->len++] = m;
@@ -1036,6 +1101,19 @@ drain_mbuf_table(struct mbuf_table *tx_q)
 }
 
 static __rte_always_inline void
+complete_async_pkts(struct vhost_dev *vdev, uint16_t qid)
+{
+	struct rte_mbuf *p_cpl[MAX_PKT_BURST];
+	uint16_t complete_count;
+
+	complete_count = rte_vhost_poll_enqueue_completed(vdev->vid,
+						qid, p_cpl, MAX_PKT_BURST);
+	vdev->nr_async_pkts -= complete_count;
+	if (complete_count)
+		free_pkts(p_cpl, complete_count);
+}
+
+static __rte_always_inline void
 drain_eth_rx(struct vhost_dev *vdev)
 {
 	uint16_t rx_count, enqueue_count;
@@ -1043,6 +1121,10 @@ drain_eth_rx(struct vhost_dev *vdev)
 
 	rx_count = rte_eth_rx_burst(ports[0], vdev->vmdq_rx_q,
 				    pkts, MAX_PKT_BURST);
+
+	while (likely(vdev->nr_async_pkts))
+		complete_async_pkts(vdev, VIRTIO_RXQ);
+
 	if (!rx_count)
 		return;
 
@@ -1067,16 +1149,22 @@ drain_eth_rx(struct vhost_dev *vdev)
 	if (builtin_net_driver) {
 		enqueue_count = vs_enqueue_pkts(vdev, VIRTIO_RXQ,
 						pkts, rx_count);
+	} else if (async_vhost_driver) {
+		enqueue_count = rte_vhost_submit_enqueue_burst(vdev->vid,
+					VIRTIO_RXQ, pkts, rx_count);
+		vdev->nr_async_pkts += enqueue_count;
 	} else {
 		enqueue_count = rte_vhost_enqueue_burst(vdev->vid, VIRTIO_RXQ,
 						pkts, rx_count);
 	}
+
 	if (enable_stats) {
 		rte_atomic64_add(&vdev->stats.rx_total_atomic, rx_count);
 		rte_atomic64_add(&vdev->stats.rx_atomic, enqueue_count);
 	}
 
-	free_pkts(pkts, rx_count);
+	if (!async_vhost_driver)
+		free_pkts(pkts, rx_count);
 }
 
 static __rte_always_inline void
@@ -1129,7 +1217,7 @@ switch_worker(void *arg __rte_unused)
 	struct vhost_dev *vdev;
 	struct mbuf_table *tx_q;
 
-	RTE_LOG(INFO, VHOST_DATA, "Procesing on Core %u started\n", lcore_id);
+	RTE_LOG(INFO, VHOST_DATA, "Processing on Core %u started\n", lcore_id);
 
 	tx_q = &lcore_tx_queue[lcore_id];
 	for (i = 0; i < rte_lcore_count(); i++) {
@@ -1173,7 +1261,7 @@ switch_worker(void *arg __rte_unused)
 
 /*
  * Remove a device from the specific data core linked list and from the
- * main linked list. Synchonization  occurs through the use of the
+ * main linked list. Synchronization  occurs through the use of the
  * lcore dev_removal_flag. Device is made volatile here to avoid re-ordering
  * of dev->remove=1 which can cause an infinite loop in the rte_pause loop.
  */
@@ -1204,7 +1292,7 @@ destroy_device(int vid)
 
 
 	/* Set the dev_removal_flag on each lcore. */
-	RTE_LCORE_FOREACH_SLAVE(lcore)
+	RTE_LCORE_FOREACH_WORKER(lcore)
 		lcore_info[lcore].dev_removal_flag = REQUEST_DEV_REMOVAL;
 
 	/*
@@ -1212,7 +1300,7 @@ destroy_device(int vid)
 	 * we can be sure that they can no longer access the device removed
 	 * from the linked lists and that the devices are no longer in use.
 	 */
-	RTE_LCORE_FOREACH_SLAVE(lcore) {
+	RTE_LCORE_FOREACH_WORKER(lcore) {
 		while (lcore_info[lcore].dev_removal_flag != ACK_DEV_REMOVAL)
 			rte_pause();
 	}
@@ -1222,6 +1310,9 @@ destroy_device(int vid)
 	RTE_LOG(INFO, VHOST_DATA,
 		"(%d) device has been removed from data core\n",
 		vdev->vid);
+
+	if (async_vhost_driver)
+		rte_vhost_async_channel_unregister(vid, VIRTIO_RXQ);
 
 	rte_free(vdev);
 }
@@ -1236,7 +1327,6 @@ new_device(int vid)
 	int lcore, core_add = 0;
 	uint32_t device_num_min = num_devices;
 	struct vhost_dev *vdev;
-
 	vdev = rte_zmalloc("vhost device", sizeof(*vdev), RTE_CACHE_LINE_SIZE);
 	if (vdev == NULL) {
 		RTE_LOG(INFO, VHOST_DATA,
@@ -1257,7 +1347,7 @@ new_device(int vid)
 	vdev->remove = 0;
 
 	/* Find a suitable lcore to add the device. */
-	RTE_LCORE_FOREACH_SLAVE(lcore) {
+	RTE_LCORE_FOREACH_WORKER(lcore) {
 		if (lcore_info[lcore].device_num < device_num_min) {
 			device_num_min = lcore_info[lcore].device_num;
 			core_add = lcore;
@@ -1276,6 +1366,20 @@ new_device(int vid)
 	RTE_LOG(INFO, VHOST_DATA,
 		"(%d) device has been added to data core %d\n",
 		vid, vdev->coreid);
+
+	if (async_vhost_driver) {
+		struct rte_vhost_async_features f;
+		struct rte_vhost_async_channel_ops channel_ops;
+		if (strncmp(dma_type, "ioat", 4) == 0) {
+			channel_ops.transfer_data = ioat_transfer_data_cb;
+			channel_ops.check_completed_copies =
+				ioat_check_completed_copies_cb;
+			f.async_inorder = 1;
+			f.async_threshold = 256;
+			return rte_vhost_async_channel_register(vid, VIRTIO_RXQ,
+				f.intval, &channel_ops);
+		}
+	}
 
 	return 0;
 }
@@ -1333,6 +1437,8 @@ print_stats(__rte_unused void *arg)
 		}
 
 		printf("===================================================\n");
+
+		fflush(stdout);
 	}
 
 	return NULL;
@@ -1363,57 +1469,6 @@ sigint_handler(__rte_unused int signum)
 }
 
 /*
- * While creating an mbuf pool, one key thing is to figure out how
- * many mbuf entries is enough for our use. FYI, here are some
- * guidelines:
- *
- * - Each rx queue would reserve @nr_rx_desc mbufs at queue setup stage
- *
- * - For each switch core (A CPU core does the packet switch), we need
- *   also make some reservation for receiving the packets from virtio
- *   Tx queue. How many is enough depends on the usage. It's normally
- *   a simple calculation like following:
- *
- *       MAX_PKT_BURST * max packet size / mbuf size
- *
- *   So, we definitely need allocate more mbufs when TSO is enabled.
- *
- * - Similarly, for each switching core, we should serve @nr_rx_desc
- *   mbufs for receiving the packets from physical NIC device.
- *
- * - We also need make sure, for each switch core, we have allocated
- *   enough mbufs to fill up the mbuf cache.
- */
-static void
-create_mbuf_pool(uint16_t nr_port, uint32_t nr_switch_core, uint32_t mbuf_size,
-	uint32_t nr_queues, uint32_t nr_rx_desc, uint32_t nr_mbuf_cache)
-{
-	uint32_t nr_mbufs;
-	uint32_t nr_mbufs_per_core;
-	uint32_t mtu = 1500;
-
-	if (mergeable)
-		mtu = 9000;
-	if (enable_tso)
-		mtu = 64 * 1024;
-
-	nr_mbufs_per_core  = (mtu + mbuf_size) * MAX_PKT_BURST /
-			(mbuf_size - RTE_PKTMBUF_HEADROOM);
-	nr_mbufs_per_core += nr_rx_desc;
-	nr_mbufs_per_core  = RTE_MAX(nr_mbufs_per_core, nr_mbuf_cache);
-
-	nr_mbufs  = nr_queues * nr_rx_desc;
-	nr_mbufs += nr_mbufs_per_core * nr_switch_core;
-	nr_mbufs *= nr_port;
-
-	mbuf_pool = rte_pktmbuf_pool_create("MBUF_POOL", nr_mbufs,
-					    nr_mbuf_cache, 0, mbuf_size,
-					    rte_socket_id());
-	if (mbuf_pool == NULL)
-		rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
-}
-
-/*
  * Main function, does initialisation and calls the per-lcore functions.
  */
 int
@@ -1424,7 +1479,7 @@ main(int argc, char *argv[])
 	int ret, i;
 	uint16_t portid;
 	static pthread_t tid;
-	uint64_t flags = 0;
+	uint64_t flags = RTE_VHOST_USER_NET_COMPLIANT_OL_FLAGS;
 
 	signal(SIGINT, sigint_handler);
 
@@ -1471,8 +1526,11 @@ main(int argc, char *argv[])
 	 * many queues here. We probably should only do allocation for
 	 * those queues we are going to use.
 	 */
-	create_mbuf_pool(valid_num_ports, rte_lcore_count() - 1, MBUF_DATA_SIZE,
-			 MAX_QUEUES, RTE_TEST_RX_DESC_DEFAULT, MBUF_CACHE_SIZE);
+	mbuf_pool = rte_pktmbuf_pool_create("MBUF_POOL", total_num_mbufs,
+					    MBUF_CACHE_SIZE, 0, MBUF_DATA_SIZE,
+					    rte_socket_id());
+	if (mbuf_pool == NULL)
+		rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
 
 	if (vm2vm_mode == VM2VM_HARDWARE) {
 		/* Enable VT loop back to let L2 switch to do it. */
@@ -1504,18 +1562,18 @@ main(int argc, char *argv[])
 	}
 
 	/* Launch all data cores. */
-	RTE_LCORE_FOREACH_SLAVE(lcore_id)
+	RTE_LCORE_FOREACH_WORKER(lcore_id)
 		rte_eal_remote_launch(switch_worker, NULL, lcore_id);
 
 	if (client_mode)
 		flags |= RTE_VHOST_USER_CLIENT;
 
-	if (dequeue_zero_copy)
-		flags |= RTE_VHOST_USER_DEQUEUE_ZERO_COPY;
-
 	/* Register vhost user driver to handle vhost messages. */
 	for (i = 0; i < nb_sockets; i++) {
 		char *file = socket_files + i * PATH_MAX;
+		if (async_vhost_driver)
+			flags = flags | RTE_VHOST_USER_ASYNC_COPY;
+
 		ret = rte_vhost_driver_register(file, flags);
 		if (ret != 0) {
 			unregister_drivers(i);
@@ -1565,9 +1623,11 @@ main(int argc, char *argv[])
 		}
 	}
 
-	RTE_LCORE_FOREACH_SLAVE(lcore_id)
+	RTE_LCORE_FOREACH_WORKER(lcore_id)
 		rte_eal_wait_lcore(lcore_id);
 
-	return 0;
+	/* clean up the EAL */
+	rte_eal_cleanup();
 
+	return 0;
 }

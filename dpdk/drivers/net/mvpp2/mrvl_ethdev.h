@@ -72,9 +72,9 @@
 /** Minimum number of sent buffers to release from shadow queue to BM */
 #define MRVL_PP2_BUF_RELEASE_BURST_SIZE	64
 
-#define MRVL_PP2_VLAN_TAG_LEN		4
-#define MRVL_PP2_ETH_HDRS_LEN		(ETHER_HDR_LEN + ETHER_CRC_LEN + \
-					(2 * MRVL_PP2_VLAN_TAG_LEN))
+#define MRVL_PP2_VLAN_TAG_LEN	4
+#define MRVL_PP2_ETH_HDRS_LEN	(RTE_ETHER_HDR_LEN + RTE_ETHER_CRC_LEN + \
+				(2 * MRVL_PP2_VLAN_TAG_LEN))
 #define MRVL_PP2_HDRS_LEN		(MV_MH_SIZE + MRVL_PP2_ETH_HDRS_LEN)
 #define MRVL_PP2_MTU_TO_MRU(mtu)	((mtu) + MRVL_PP2_HDRS_LEN)
 #define MRVL_PP2_MRU_TO_MTU(mru)	((mru) - MRVL_PP2_HDRS_LEN)
@@ -186,7 +186,6 @@ struct mrvl_priv {
 	uint8_t bpool_bit;
 	uint8_t rss_hf_tcp;
 	uint8_t uc_mc_flushed;
-	uint8_t vlan_flushed;
 	uint8_t isolated;
 	uint8_t multiseg;
 
@@ -209,9 +208,10 @@ struct mrvl_priv {
 	LIST_HEAD(shaper_profiles, mrvl_tm_shaper_profile) shaper_profiles;
 	LIST_HEAD(nodes, mrvl_tm_node) nodes;
 	uint64_t rate_max;
+
+	uint8_t configured; /** indicates if device has been configured */
 };
 
-/** Flow operations forward declaration. */
 extern const struct rte_flow_ops mrvl_flow_ops;
 
 /** Meter operations forward declaration. */

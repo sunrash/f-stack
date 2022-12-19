@@ -145,7 +145,7 @@ int rte_kvargs_process(const struct rte_kvargs *kvlist,
  *   The rte_kvargs structure
  * @param key_match
  *   The key that should match, or NULL to count all associations
-
+ *
  * @return
  *   The number of entries
  */
@@ -171,7 +171,7 @@ unsigned rte_kvargs_count(const struct rte_kvargs *kvlist,
  *   0 if the strings match.
  *   !0 otherwise or on error.
  *
- *   Unless strcmp, comparison ordering is not kept.
+ *   Unlike strcmp, comparison ordering is not kept.
  *   In order for rte_kvargs_process to stop processing on match error,
  *   a negative value is returned even if strcmp had returned a positive one.
  */

@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause
  *
- * Copyright (c) 2016-2018 Solarflare Communications Inc.
- * All rights reserved.
+ * Copyright(c) 2019-2020 Xilinx, Inc.
+ * Copyright(c) 2016-2019 Solarflare Communications Inc.
  *
  * This software was jointly developed between OKTET Labs (under contract
  * for Solarflare) and Solarflare Communications, Inc.
@@ -16,6 +16,7 @@
 #include "efx.h"
 
 #include "sfc.h"
+#include "sfc_debug.h"
 #include "sfc_log.h"
 #include "sfc_ev.h"
 #include "sfc_rx.h"
@@ -30,7 +31,7 @@ sfc_dma_alloc(const struct sfc_adapter *sa, const char *name, uint16_t id,
 {
 	const struct rte_memzone *mz;
 
-	sfc_log_init(sa, "name=%s id=%u len=%lu socket_id=%d",
+	sfc_log_init(sa, "name=%s id=%u len=%zu socket_id=%d",
 		     name, id, len, socket_id);
 
 	mz = rte_eth_dma_zone_reserve(sa->eth_dev, name, id, len,
@@ -50,6 +51,11 @@ sfc_dma_alloc(const struct sfc_adapter *sa, const char *name, uint16_t id,
 
 	esmp->esm_mz = mz;
 	esmp->esm_base = mz->addr;
+
+	sfc_info(sa,
+		 "DMA name=%s id=%u len=%lu socket_id=%d => virt=%p iova=%lx",
+		 name, id, len, socket_id, esmp->esm_base,
+		 (unsigned long)esmp->esm_addr);
 
 	return 0;
 }
@@ -148,7 +154,8 @@ sfc_check_conf(struct sfc_adapter *sa)
 		rc = EINVAL;
 	}
 
-	if (conf->intr_conf.rxq != 0) {
+	if (conf->intr_conf.rxq != 0 &&
+	    (sa->priv.dp_rx->features & SFC_DP_RX_FEAT_INTR) == 0) {
 		sfc_err(sa, "Receive queue interrupt not supported");
 		rc = EINVAL;
 	}
@@ -198,7 +205,7 @@ sfc_estimate_resource_limits(struct sfc_adapter *sa)
 		MIN(encp->enc_txq_limit,
 		    limits.edl_max_evq_count - 1 - limits.edl_max_rxq_count);
 
-	if (sa->tso)
+	if (sa->tso && encp->enc_fw_assisted_tso_v2_enabled)
 		limits.edl_max_txq_count =
 			MIN(limits.edl_max_txq_count,
 			    encp->enc_fw_assisted_tso_v2_n_contexts /
@@ -240,8 +247,8 @@ sfc_estimate_resource_limits(struct sfc_adapter *sa)
 	return 0;
 
 fail_get_vi_pool:
-fail_nic_init:
 	efx_nic_fini(sa->nic);
+fail_nic_init:
 	return rc;
 }
 
@@ -265,6 +272,7 @@ sfc_set_drv_limits(struct sfc_adapter *sa)
 static int
 sfc_set_fw_subvariant(struct sfc_adapter *sa)
 {
+	struct sfc_adapter_shared *sas = sfc_sa2shared(sa);
 	const efx_nic_cfg_t *encp = efx_nic_cfg_get(sa->nic);
 	uint64_t tx_offloads = sa->eth_dev->data->dev_conf.txmode.offloads;
 	unsigned int txq_index;
@@ -277,11 +285,11 @@ sfc_set_fw_subvariant(struct sfc_adapter *sa)
 		return 0;
 	}
 
-	for (txq_index = 0; txq_index < sa->txq_count; ++txq_index) {
-		struct sfc_txq_info *txq_info = &sa->txq_info[txq_index];
+	for (txq_index = 0; txq_index < sas->txq_count; ++txq_index) {
+		struct sfc_txq_info *txq_info = &sas->txq_info[txq_index];
 
-		if (txq_info->txq != NULL)
-			tx_offloads |= txq_info->txq->offloads;
+		if (txq_info->state & SFC_TXQ_INITIALIZED)
+			tx_offloads |= txq_info->offloads;
 	}
 
 	if (tx_offloads & (DEV_TX_OFFLOAD_IPV4_CKSUM |
@@ -341,6 +349,15 @@ sfc_try_start(struct sfc_adapter *sa)
 		goto fail_nic_init;
 
 	encp = efx_nic_cfg_get(sa->nic);
+
+	/*
+	 * Refresh (since it may change on NIC reset/restart) a copy of
+	 * supported tunnel encapsulations in shared memory to be used
+	 * on supported Rx packet type classes get.
+	 */
+	sa->priv.shared->tunnel_encaps =
+		encp->enc_tunnel_encapsulations_supported;
+
 	if (encp->enc_tunnel_encapsulations_supported != 0) {
 		sfc_log_init(sa, "apply tunnel config");
 		rc = efx_tunnel_reconfigure(sa->nic);
@@ -424,7 +441,20 @@ sfc_start(struct sfc_adapter *sa)
 
 	sa->state = SFC_ADAPTER_STARTING;
 
+	rc = 0;
 	do {
+		/*
+		 * FIXME Try to recreate vSwitch on start retry.
+		 * vSwitch is absent after MC reboot like events and
+		 * we should recreate it. May be we need proper
+		 * indication instead of guessing.
+		 */
+		if (rc != 0) {
+			sfc_sriov_vswitch_destroy(sa);
+			rc = sfc_sriov_vswitch_create(sa);
+			if (rc != 0)
+				goto fail_sriov_vswitch_create;
+		}
 		rc = sfc_try_start(sa);
 	} while ((--start_tries > 0) &&
 		 (rc == EIO || rc == EAGAIN || rc == ENOENT || rc == EINVAL));
@@ -437,6 +467,7 @@ sfc_start(struct sfc_adapter *sa)
 	return 0;
 
 fail_try_start:
+fail_sriov_vswitch_create:
 	sa->state = SFC_ADAPTER_CONFIGURED;
 fail_bad_state:
 	sfc_log_init(sa, "failed %d", rc);
@@ -600,18 +631,45 @@ sfc_close(struct sfc_adapter *sa)
 	sfc_log_init(sa, "done");
 }
 
+static efx_rc_t
+sfc_find_mem_bar(efsys_pci_config_t *configp, int bar_index,
+		 efsys_bar_t *barp)
+{
+	efsys_bar_t result;
+	struct rte_pci_device *dev;
+
+	memset(&result, 0, sizeof(result));
+
+	if (bar_index < 0 || bar_index >= PCI_MAX_RESOURCE)
+		return EINVAL;
+
+	dev = configp->espc_dev;
+
+	result.esb_rid = bar_index;
+	result.esb_dev = dev;
+	result.esb_base = dev->mem_resource[bar_index].addr;
+
+	*barp = result;
+
+	return 0;
+}
+
 static int
-sfc_mem_bar_init(struct sfc_adapter *sa, unsigned int membar)
+sfc_mem_bar_init(struct sfc_adapter *sa, const efx_bar_region_t *mem_ebrp)
 {
 	struct rte_eth_dev *eth_dev = sa->eth_dev;
 	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(eth_dev);
 	efsys_bar_t *ebp = &sa->mem_bar;
-	struct rte_mem_resource *res = &pci_dev->mem_resource[membar];
+	struct rte_mem_resource *res =
+		&pci_dev->mem_resource[mem_ebrp->ebr_index];
 
 	SFC_BAR_LOCK_INIT(ebp, eth_dev->data->name);
-	ebp->esb_rid = membar;
+	ebp->esb_rid = mem_ebrp->ebr_index;
 	ebp->esb_dev = pci_dev;
 	ebp->esb_base = res->addr;
+
+	sa->fcw_offset = mem_ebrp->ebr_offset;
+
 	return 0;
 }
 
@@ -641,7 +699,7 @@ static const uint8_t default_rss_key[EFX_RSS_KEY_SIZE] = {
 static int
 sfc_rss_attach(struct sfc_adapter *sa)
 {
-	struct sfc_rss *rss = &sa->rss;
+	struct sfc_rss *rss = &sfc_sa2shared(sa)->rss;
 	int rc;
 
 	rc = efx_intr_init(sa->nic, sa->intr.type, NULL);
@@ -673,6 +731,7 @@ sfc_rss_attach(struct sfc_adapter *sa)
 	efx_intr_fini(sa->nic);
 
 	rte_memcpy(rss->key, default_rss_key, sizeof(rss->key));
+	rss->dummy_rss_context = EFX_RSS_CONTEXT_DEFAULT;
 
 	return 0;
 
@@ -715,6 +774,10 @@ sfc_attach(struct sfc_adapter *sa)
 	if (rc != 0)
 		goto fail_nic_reset;
 
+	rc = sfc_sriov_attach(sa);
+	if (rc != 0)
+		goto fail_sriov_attach;
+
 	/*
 	 * Probed NIC is sufficient for tunnel init.
 	 * Initialize tunnel support to be able to use libefx
@@ -727,11 +790,28 @@ sfc_attach(struct sfc_adapter *sa)
 
 	encp = efx_nic_cfg_get(sa->nic);
 
-	if (sa->dp_tx->features & SFC_DP_TX_FEAT_TSO) {
-		sa->tso = encp->enc_fw_assisted_tso_v2_enabled;
+	/*
+	 * Make a copy of supported tunnel encapsulations in shared
+	 * memory to be used on supported Rx packet type classes get.
+	 */
+	sa->priv.shared->tunnel_encaps =
+		encp->enc_tunnel_encapsulations_supported;
+
+	if (sfc_dp_tx_offload_capa(sa->priv.dp_tx) & DEV_TX_OFFLOAD_TCP_TSO) {
+		sa->tso = encp->enc_fw_assisted_tso_v2_enabled ||
+			  encp->enc_tso_v3_enabled;
 		if (!sa->tso)
-			sfc_warn(sa,
-				 "TSO support isn't available on this adapter");
+			sfc_info(sa, "TSO support isn't available on this adapter");
+	}
+
+	if (sa->tso &&
+	    (sfc_dp_tx_offload_capa(sa->priv.dp_tx) &
+	     (DEV_TX_OFFLOAD_VXLAN_TNL_TSO |
+	      DEV_TX_OFFLOAD_GENEVE_TNL_TSO)) != 0) {
+		sa->tso_encap = encp->enc_fw_assisted_tso_v2_encap_enabled ||
+				encp->enc_tso_v3_enabled;
+		if (!sa->tso_encap)
+			sfc_info(sa, "Encapsulated TSO support isn't available on this adapter");
 	}
 
 	sfc_log_init(sa, "estimate resource limits");
@@ -739,8 +819,23 @@ sfc_attach(struct sfc_adapter *sa)
 	if (rc != 0)
 		goto fail_estimate_rsrc_limits;
 
+	sa->evq_max_entries = encp->enc_evq_max_nevs;
+	SFC_ASSERT(rte_is_power_of_2(sa->evq_max_entries));
+
+	sa->evq_min_entries = encp->enc_evq_min_nevs;
+	SFC_ASSERT(rte_is_power_of_2(sa->evq_min_entries));
+
+	sa->rxq_max_entries = encp->enc_rxq_max_ndescs;
+	SFC_ASSERT(rte_is_power_of_2(sa->rxq_max_entries));
+
+	sa->rxq_min_entries = encp->enc_rxq_min_ndescs;
+	SFC_ASSERT(rte_is_power_of_2(sa->rxq_min_entries));
+
 	sa->txq_max_entries = encp->enc_txq_max_ndescs;
 	SFC_ASSERT(rte_is_power_of_2(sa->txq_max_entries));
+
+	sa->txq_min_entries = encp->enc_txq_min_ndescs;
+	SFC_ASSERT(rte_is_power_of_2(sa->txq_min_entries));
 
 	rc = sfc_intr_attach(sa);
 	if (rc != 0)
@@ -762,15 +857,35 @@ sfc_attach(struct sfc_adapter *sa)
 	if (rc != 0)
 		goto fail_filter_attach;
 
+	rc = sfc_mae_attach(sa);
+	if (rc != 0)
+		goto fail_mae_attach;
+
 	sfc_log_init(sa, "fini nic");
 	efx_nic_fini(enp);
 
 	sfc_flow_init(sa);
 
+	/*
+	 * Create vSwitch to be able to use VFs when PF is not started yet
+	 * as DPDK port. VFs should be able to talk to each other even
+	 * if PF is down.
+	 */
+	rc = sfc_sriov_vswitch_create(sa);
+	if (rc != 0)
+		goto fail_sriov_vswitch_create;
+
 	sa->state = SFC_ADAPTER_INITIALIZED;
 
 	sfc_log_init(sa, "done");
 	return 0;
+
+fail_sriov_vswitch_create:
+	sfc_flow_fini(sa);
+	sfc_mae_detach(sa);
+
+fail_mae_attach:
+	sfc_filter_detach(sa);
 
 fail_filter_attach:
 	sfc_rss_detach(sa);
@@ -790,7 +905,9 @@ fail_intr_attach:
 fail_estimate_rsrc_limits:
 fail_tunnel_init:
 	efx_tunnel_fini(sa->nic);
+	sfc_sriov_detach(sa);
 
+fail_sriov_attach:
 fail_nic_reset:
 
 	sfc_log_init(sa, "failed %d", rc);
@@ -804,14 +921,18 @@ sfc_detach(struct sfc_adapter *sa)
 
 	SFC_ASSERT(sfc_adapter_is_locked(sa));
 
+	sfc_sriov_vswitch_destroy(sa);
+
 	sfc_flow_fini(sa);
 
+	sfc_mae_detach(sa);
 	sfc_filter_detach(sa);
 	sfc_rss_detach(sa);
 	sfc_port_detach(sa);
 	sfc_ev_detach(sa);
 	sfc_intr_detach(sa);
 	efx_tunnel_fini(sa->nic);
+	sfc_sriov_detach(sa);
 
 	sa->state = SFC_ADAPTER_UNINITIALIZED;
 }
@@ -974,11 +1095,43 @@ sfc_nic_probe(struct sfc_adapter *sa)
 	return 0;
 }
 
+static efx_rc_t
+sfc_pci_config_readd(efsys_pci_config_t *configp, uint32_t offset,
+		     efx_dword_t *edp)
+{
+	int rc;
+
+	rc = rte_pci_read_config(configp->espc_dev, edp->ed_u32, sizeof(*edp),
+				 offset);
+
+	return (rc < 0 || rc != sizeof(*edp)) ? EIO : 0;
+}
+
+static int
+sfc_family(struct sfc_adapter *sa, efx_bar_region_t *mem_ebrp)
+{
+	struct rte_eth_dev *eth_dev = sa->eth_dev;
+	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(eth_dev);
+	efsys_pci_config_t espcp;
+	static const efx_pci_ops_t ops = {
+		.epo_config_readd = sfc_pci_config_readd,
+		.epo_find_mem_bar = sfc_find_mem_bar,
+	};
+	int rc;
+
+	espcp.espc_dev = pci_dev;
+
+	rc = efx_family_probe_bar(pci_dev->id.vendor_id,
+				  pci_dev->id.device_id,
+				  &espcp, &ops, &sa->family, mem_ebrp);
+
+	return rc;
+}
+
 int
 sfc_probe(struct sfc_adapter *sa)
 {
-	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(sa->eth_dev);
-	unsigned int membar;
+	efx_bar_region_t mem_ebrp;
 	efx_nic_t *enp;
 	int rc;
 
@@ -990,21 +1143,23 @@ sfc_probe(struct sfc_adapter *sa)
 	rte_atomic32_init(&sa->restart_required);
 
 	sfc_log_init(sa, "get family");
-	rc = efx_family(pci_dev->id.vendor_id, pci_dev->id.device_id,
-			&sa->family, &membar);
+	rc = sfc_family(sa, &mem_ebrp);
 	if (rc != 0)
 		goto fail_family;
-	sfc_log_init(sa, "family is %u, membar is %u", sa->family, membar);
+	sfc_log_init(sa,
+		     "family is %u, membar is %u, function control window offset is %lu",
+		     sa->family, mem_ebrp.ebr_index, mem_ebrp.ebr_offset);
 
 	sfc_log_init(sa, "init mem bar");
-	rc = sfc_mem_bar_init(sa, membar);
+	rc = sfc_mem_bar_init(sa, &mem_ebrp);
 	if (rc != 0)
 		goto fail_mem_bar_init;
 
 	sfc_log_init(sa, "create nic");
 	rte_spinlock_init(&sa->nic_lock);
 	rc = efx_nic_create(sa->family, (efsys_identifier_t *)sa,
-			    &sa->mem_bar, &sa->nic_lock, &enp);
+			    &sa->mem_bar, mem_ebrp.ebr_offset,
+			    &sa->nic_lock, &enp);
 	if (rc != 0)
 		goto fail_nic_create;
 	sa->nic = enp;
@@ -1083,12 +1238,12 @@ sfc_register_logtype(const struct rte_pci_addr *pci_addr,
 		++lt_prefix_str_size; /* Reserve space for prefix separator */
 		lt_str_size_max = lt_prefix_str_size + PCI_PRI_STR_SIZE + 1;
 	} else {
-		return RTE_LOGTYPE_PMD;
+		return sfc_logtype_driver;
 	}
 
 	lt_str = rte_zmalloc("logtype_str", lt_str_size_max, 0);
 	if (lt_str == NULL)
-		return RTE_LOGTYPE_PMD;
+		return sfc_logtype_driver;
 
 	strncpy(lt_str, lt_prefix_str, lt_prefix_str_size);
 	lt_str[lt_prefix_str_size - 1] = '.';
@@ -1099,5 +1254,53 @@ sfc_register_logtype(const struct rte_pci_addr *pci_addr,
 	ret = rte_log_register_type_and_pick_level(lt_str, ll_default);
 	rte_free(lt_str);
 
-	return (ret < 0) ? RTE_LOGTYPE_PMD : ret;
+	if (ret < 0)
+		return sfc_logtype_driver;
+
+	return ret;
+}
+
+struct sfc_hw_switch_id {
+	char	board_sn[RTE_SIZEOF_FIELD(efx_nic_board_info_t, enbi_serial)];
+};
+
+int
+sfc_hw_switch_id_init(struct sfc_adapter *sa,
+		      struct sfc_hw_switch_id **idp)
+{
+	efx_nic_board_info_t board_info;
+	struct sfc_hw_switch_id *id;
+	int rc;
+
+	if (idp == NULL)
+		return EINVAL;
+
+	id = rte_zmalloc("sfc_hw_switch_id", sizeof(*id), 0);
+	if (id == NULL)
+		return ENOMEM;
+
+	rc = efx_nic_get_board_info(sa->nic, &board_info);
+	if (rc != 0)
+		return rc;
+
+	memcpy(id->board_sn, board_info.enbi_serial, sizeof(id->board_sn));
+
+	*idp = id;
+
+	return 0;
+}
+
+void
+sfc_hw_switch_id_fini(__rte_unused struct sfc_adapter *sa,
+		      struct sfc_hw_switch_id *id)
+{
+	rte_free(id);
+}
+
+bool
+sfc_hw_switch_ids_equal(const struct sfc_hw_switch_id *left,
+			const struct sfc_hw_switch_id *right)
+{
+	return strncmp(left->board_sn, right->board_sn,
+		       sizeof(left->board_sn)) == 0;
 }

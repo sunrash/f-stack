@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2017 Intel Corporation
+ * Copyright(c) 2017-2020 Intel Corporation
  */
 
 #ifndef _RTE_NET_CRC_H_
@@ -10,12 +10,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/** CRC polynomials */
-#define CRC32_ETH_POLYNOMIAL 0x04c11db7UL
-#define CRC16_CCITT_POLYNOMIAL 0x1021U
-
-#define CRC_LUT_SIZE 256
 
 /** CRC types */
 enum rte_net_crc_type {
@@ -29,6 +23,7 @@ enum rte_net_crc_alg {
 	RTE_NET_CRC_SCALAR = 0,
 	RTE_NET_CRC_SSE42,
 	RTE_NET_CRC_NEON,
+	RTE_NET_CRC_AVX512,
 };
 
 /**
@@ -41,6 +36,7 @@ enum rte_net_crc_alg {
  *   - RTE_NET_CRC_SCALAR
  *   - RTE_NET_CRC_SSE42 (Use 64-bit SSE4.2 intrinsic)
  *   - RTE_NET_CRC_NEON (Use ARM Neon intrinsic)
+ *   - RTE_NET_CRC_AVX512 (Use 512-bit AVX intrinsic)
  */
 void
 rte_net_crc_set_alg(enum rte_net_crc_alg alg);

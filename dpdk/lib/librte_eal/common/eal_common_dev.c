@@ -76,7 +76,7 @@ static int cmp_dev_name(const struct rte_device *dev, const void *_name)
 	return strcmp(dev->name, name);
 }
 
-int __rte_experimental
+int
 rte_dev_is_probed(const struct rte_device *dev)
 {
 	/* The field driver should be set only when the probe is successful. */
@@ -425,7 +425,7 @@ rollback:
 	return ret;
 }
 
-int __rte_experimental
+int
 rte_dev_event_callback_register(const char *device_name,
 				rte_dev_event_cb_fn cb_fn,
 				void *cb_arg)
@@ -480,7 +480,9 @@ rte_dev_event_callback_register(const char *device_name,
 		RTE_LOG(ERR, EAL,
 			"The callback is already exist, no need "
 			"to register again.\n");
+		event_cb = NULL;
 		ret = -EEXIST;
+		goto error;
 	}
 
 	rte_spinlock_unlock(&dev_event_lock);
@@ -491,7 +493,7 @@ error:
 	return ret;
 }
 
-int __rte_experimental
+int
 rte_dev_event_callback_unregister(const char *device_name,
 				  rte_dev_event_cb_fn cb_fn,
 				  void *cb_arg)
@@ -526,17 +528,24 @@ rte_dev_event_callback_unregister(const char *device_name,
 		 */
 		if (event_cb->active == 0) {
 			TAILQ_REMOVE(&dev_event_cbs, event_cb, next);
+			free(event_cb->dev_name);
 			free(event_cb);
 			ret++;
 		} else {
-			continue;
+			ret = -EAGAIN;
+			break;
 		}
 	}
+
+	/* this callback is not be registered */
+	if (ret == 0)
+		ret = -ENOENT;
+
 	rte_spinlock_unlock(&dev_event_lock);
 	return ret;
 }
 
-void __rte_experimental
+void
 rte_dev_event_callback_process(const char *device_name,
 			       enum rte_dev_event_type event)
 {
@@ -562,12 +571,11 @@ rte_dev_event_callback_process(const char *device_name,
 	rte_spinlock_unlock(&dev_event_lock);
 }
 
-__rte_experimental
 int
 rte_dev_iterator_init(struct rte_dev_iterator *it,
 		      const char *dev_str)
 {
-	struct rte_devargs devargs;
+	struct rte_devargs devargs = { .bus = NULL };
 	struct rte_class *cls = NULL;
 	struct rte_bus *bus = NULL;
 
@@ -715,7 +723,6 @@ end:
 	it->device = dev;
 	return dev == NULL;
 }
-__rte_experimental
 struct rte_device *
 rte_dev_iterator_next(struct rte_dev_iterator *it)
 {
@@ -758,4 +765,38 @@ out:
 	free(bus_str);
 	free(cls_str);
 	return it->device;
+}
+
+int
+rte_dev_dma_map(struct rte_device *dev, void *addr, uint64_t iova,
+		size_t len)
+{
+	if (dev->bus->dma_map == NULL || len == 0) {
+		rte_errno = ENOTSUP;
+		return -1;
+	}
+	/* Memory must be registered through rte_extmem_* APIs */
+	if (rte_mem_virt2memseg_list(addr) == NULL) {
+		rte_errno = EINVAL;
+		return -1;
+	}
+
+	return dev->bus->dma_map(dev, addr, iova, len);
+}
+
+int
+rte_dev_dma_unmap(struct rte_device *dev, void *addr, uint64_t iova,
+		  size_t len)
+{
+	if (dev->bus->dma_unmap == NULL || len == 0) {
+		rte_errno = ENOTSUP;
+		return -1;
+	}
+	/* Memory must be registered through rte_extmem_* APIs */
+	if (rte_mem_virt2memseg_list(addr) == NULL) {
+		rte_errno = EINVAL;
+		return -1;
+	}
+
+	return dev->bus->dma_unmap(dev, addr, iova, len);
 }

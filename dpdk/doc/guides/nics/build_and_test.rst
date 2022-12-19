@@ -19,45 +19,12 @@ information on how to build and run testpmd.
 Driver Compilation
 ------------------
 
-To compile a PMD for a platform, run make with appropriate target as shown below.
-Use "make" command in Linux and "gmake" in FreeBSD. This will also build testpmd.
+To compile a PMD for a platform, build DPDK
+as described in the "Getting Started Guide" for your platform.
+This will also build testpmd.
 
-To check available targets:
-
-.. code-block:: console
-
-   cd <DPDK-source-directory>
-   make showconfigs
-
-Example output:
-
-.. code-block:: console
-
-   arm-armv7a-linuxapp-gcc
-   arm64-armv8a-linuxapp-gcc
-   arm64-dpaa2-linuxapp-gcc
-   arm64-thunderx-linuxapp-gcc
-   arm64-xgene1-linuxapp-gcc
-   i686-native-linuxapp-gcc
-   i686-native-linuxapp-icc
-   ppc_64-power8-linuxapp-gcc
-   x86_64-native-bsdapp-clang
-   x86_64-native-bsdapp-gcc
-   x86_64-native-linuxapp-clang
-   x86_64-native-linuxapp-gcc
-   x86_64-native-linuxapp-icc
-   x86_x32-native-linuxapp-gcc
-
-To compile a PMD for Linux x86_64 gcc target, run the following "make" command:
-
-.. code-block:: console
-
-   make install T=x86_64-native-linuxapp-gcc
-
-Use ARM (ThunderX, DPAA, X-Gene) or PowerPC target for respective platform.
-
-For more information, refer to the :ref:`Getting Started Guide for Linux <linux_gsg>`
-or :ref:`Getting Started Guide for FreeBSD <freebsd_gsg>` depending on your platform.
+Detailed instructions are available
+in the :doc:`meson build guide <../prog_guide/build-sdk-meson>`.
 
 Running testpmd in Linux
 ------------------------
@@ -102,7 +69,7 @@ This section demonstrates how to setup and run ``testpmd`` in Linux.
    .. code-block:: console
 
       modprobe uio
-      insmod ./x86_64-native-linuxapp-gcc/kmod/igb_uio.ko
+      insmod igb_uio.ko
 
    or
 
@@ -139,7 +106,7 @@ This section demonstrates how to setup and run ``testpmd`` in Linux.
 
    .. code-block:: console
 
-      ./x86_64-native-linuxapp-gcc/app/testpmd -l 0-3 -n 4 -- -i
+      ./<build_dir>/app/dpdk-testpmd -l 0-3 -n 4 -- -i
 
    Successful execution will show initialization messages from EAL, PMD and
    testpmd application. A prompt will be displayed at the end for user commands

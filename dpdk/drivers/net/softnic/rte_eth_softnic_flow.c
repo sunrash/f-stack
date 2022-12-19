@@ -169,22 +169,22 @@ flow_item_is_proto(enum rte_flow_item_type type,
 
 	case RTE_FLOW_ITEM_TYPE_ETH:
 		*mask = &rte_flow_item_eth_mask;
-		*size = sizeof(struct rte_flow_item_eth);
+		*size = sizeof(struct rte_ether_hdr);
 		return 1; /* TRUE */
 
 	case RTE_FLOW_ITEM_TYPE_VLAN:
 		*mask = &rte_flow_item_vlan_mask;
-		*size = sizeof(struct rte_flow_item_vlan);
+		*size = sizeof(struct rte_vlan_hdr);
 		return 1;
 
 	case RTE_FLOW_ITEM_TYPE_IPV4:
 		*mask = &rte_flow_item_ipv4_mask;
-		*size = sizeof(struct rte_flow_item_ipv4);
+		*size = sizeof(struct rte_ipv4_hdr);
 		return 1;
 
 	case RTE_FLOW_ITEM_TYPE_IPV6:
 		*mask = &rte_flow_item_ipv6_mask;
-		*size = sizeof(struct rte_flow_item_ipv6);
+		*size = sizeof(struct rte_ipv6_hdr);
 		return 1;
 
 	case RTE_FLOW_ITEM_TYPE_ICMP:
@@ -930,7 +930,7 @@ flow_rule_match_acl_get(struct pmd_internals *softnic __rte_unused,
  * Both *tmask* and *fmask* are byte arrays of size *tsize* and *fsize*
  * respectively.
  * They are located within a larger buffer at offsets *toffset* and *foffset*
- * respectivelly. Both *tmask* and *fmask* represent bitmasks for the larger
+ * respectively. Both *tmask* and *fmask* represent bitmasks for the larger
  * buffer.
  * Question: are the two masks equivalent?
  *
@@ -1624,12 +1624,12 @@ flow_rule_action_get(struct pmd_internals *softnic,
 
 			/* RTE_TABLE_ACTION_METER */
 			rule_action->mtr.mtr[0].meter_profile_id = meter_profile_id;
-			rule_action->mtr.mtr[0].policer[e_RTE_METER_GREEN] =
-				softnic_table_action_policer(m->params.action[RTE_MTR_GREEN]);
-			rule_action->mtr.mtr[0].policer[e_RTE_METER_YELLOW] =
-				softnic_table_action_policer(m->params.action[RTE_MTR_YELLOW]);
-			rule_action->mtr.mtr[0].policer[e_RTE_METER_RED] =
-				softnic_table_action_policer(m->params.action[RTE_MTR_RED]);
+			rule_action->mtr.mtr[0].policer[RTE_COLOR_GREEN] =
+				softnic_table_action_policer(m->params.action[RTE_COLOR_GREEN]);
+			rule_action->mtr.mtr[0].policer[RTE_COLOR_YELLOW] =
+				softnic_table_action_policer(m->params.action[RTE_COLOR_YELLOW]);
+			rule_action->mtr.mtr[0].policer[RTE_COLOR_RED] =
+				softnic_table_action_policer(m->params.action[RTE_COLOR_RED]);
 			rule_action->mtr.tc_mask = 1;
 			rule_action->action_mask |= 1 << RTE_TABLE_ACTION_MTR;
 			break;
@@ -1681,9 +1681,9 @@ flow_rule_action_get(struct pmd_internals *softnic,
 					item,
 					"VXLAN ENCAP: first encap item should be ether");
 			}
-			ether_addr_copy(&spec.eth.dst,
+			rte_ether_addr_copy(&spec.eth.dst,
 					&rule_action->encap.vxlan.ether.da);
-			ether_addr_copy(&spec.eth.src,
+			rte_ether_addr_copy(&spec.eth.src,
 					&rule_action->encap.vxlan.ether.sa);
 
 			item++;

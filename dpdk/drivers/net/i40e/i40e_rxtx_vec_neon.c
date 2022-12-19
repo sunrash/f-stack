@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <rte_ethdev_driver.h>
 #include <rte_malloc.h>
+#include <rte_vect.h>
 
 #include "base/i40e_prototype.h"
 #include "base/i40e_type.h"
@@ -13,7 +14,6 @@
 #include "i40e_rxtx.h"
 #include "i40e_rxtx_vec_common.h"
 
-#include <arm_neon.h>
 
 #pragma GCC diagnostic ignored "-Wcast-qual"
 
@@ -72,8 +72,9 @@ i40e_rxq_rearm(struct i40e_rx_queue *rxq)
 	rx_id = (uint16_t)((rxq->rxrearm_start == 0) ?
 			     (rxq->nb_rx_desc - 1) : (rxq->rxrearm_start - 1));
 
+	rte_io_wmb();
 	/* Update the tail pointer on the NIC */
-	I40E_PCI_REG_WRITE(rxq->qrx_tail, rx_id);
+	I40E_PCI_REG_WRITE_RELAXED(rxq->qrx_tail, rx_id);
 }
 
 static inline void
@@ -150,7 +151,7 @@ desc_to_olflags_v(struct i40e_rx_queue *rxq, uint64x2_t descs[4],
 					      vreinterpretq_u8_u32(l3_l4e)));
 	/* then we shift left 1 bit */
 	l3_l4e = vshlq_n_u32(l3_l4e, 1);
-	/* we need to mask out the reduntant bits */
+	/* we need to mask out the redundant bits */
 	l3_l4e = vandq_u32(l3_l4e, cksum_mask);
 
 	vlan0 = vorrq_u32(vlan0, rss);
@@ -171,8 +172,8 @@ desc_to_olflags_v(struct i40e_rx_queue *rxq, uint64x2_t descs[4],
 #define I40E_UINT16_BIT (CHAR_BIT * sizeof(uint16_t))
 
 static inline void
-desc_to_ptype_v(uint64x2_t descs[4], struct rte_mbuf **rx_pkts,
-		uint32_t *ptype_tbl)
+desc_to_ptype_v(uint64x2_t descs[4], struct rte_mbuf **__rte_restrict rx_pkts,
+		uint32_t *__rte_restrict ptype_tbl)
 {
 	int i;
 	uint8_t ptype;
@@ -186,14 +187,16 @@ desc_to_ptype_v(uint64x2_t descs[4], struct rte_mbuf **rx_pkts,
 
 }
 
- /*
+/**
+ * vPMD raw receive routine, only accept(nb_pkts >= RTE_I40E_DESCS_PER_LOOP)
+ *
  * Notice:
  * - nb_pkts < RTE_I40E_DESCS_PER_LOOP, just return no packet
- * - nb_pkts > RTE_I40E_VPMD_RX_BURST, only scan RTE_I40E_VPMD_RX_BURST
- *   numbers of DD bits
+ * - floor align nb_pkts to a RTE_I40E_DESCS_PER_LOOP power-of-two
  */
 static inline uint16_t
-_recv_raw_pkts_vec(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
+_recv_raw_pkts_vec(struct i40e_rx_queue *__rte_restrict rxq,
+		   struct rte_mbuf **__rte_restrict rx_pkts,
 		   uint16_t nb_pkts, uint8_t *split_packet)
 {
 	volatile union i40e_rx_desc *rxdp;
@@ -227,9 +230,6 @@ _recv_raw_pkts_vec(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
 		rxq->crc_len, /* sub crc on data_len */
 		0, 0, 0       /* ignore non-length fields */
 		};
-
-	/* nb_pkts shall be less equal than RTE_I40E_MAX_RX_BURST */
-	nb_pkts = RTE_MIN(nb_pkts, RTE_I40E_MAX_RX_BURST);
 
 	/* nb_pkts has to be floor-aligned to RTE_I40E_DESCS_PER_LOOP */
 	nb_pkts = RTE_ALIGN_FLOOR(nb_pkts, RTE_I40E_DESCS_PER_LOOP);
@@ -280,23 +280,30 @@ _recv_raw_pkts_vec(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
 
 		int32x4_t len_shl = {0, 0, 0, PKTLEN_SHIFT};
 
-		/* B.1 load 1 mbuf point */
+		/* B.1 load 2 mbuf point */
 		mbp1 = vld1q_u64((uint64_t *)&sw_ring[pos]);
 		/* Read desc statuses backwards to avoid race condition */
-		/* A.1 load 4 pkts desc */
+		/* A.1 load desc[3] */
 		descs[3] =  vld1q_u64((uint64_t *)(rxdp + 3));
-		rte_rmb();
 
 		/* B.2 copy 2 mbuf point into rx_pkts  */
 		vst1q_u64((uint64_t *)&rx_pkts[pos], mbp1);
 
-		/* B.1 load 1 mbuf point */
+		/* B.1 load 2 mbuf point */
 		mbp2 = vld1q_u64((uint64_t *)&sw_ring[pos + 2]);
 
+		/* A.1 load desc[2-0] */
 		descs[2] =  vld1q_u64((uint64_t *)(rxdp + 2));
-		/* B.1 load 2 mbuf point */
 		descs[1] =  vld1q_u64((uint64_t *)(rxdp + 1));
 		descs[0] =  vld1q_u64((uint64_t *)(rxdp));
+
+		/* Use acquire fence to order loads of descriptor qwords */
+		rte_atomic_thread_fence(__ATOMIC_ACQUIRE);
+		/* A.2 reload qword0 to make it ordered after qword1 load */
+		descs[3] = vld1q_lane_u64((uint64_t *)(rxdp + 3), descs[3], 0);
+		descs[2] = vld1q_lane_u64((uint64_t *)(rxdp + 2), descs[2], 0);
+		descs[1] = vld1q_lane_u64((uint64_t *)(rxdp + 1), descs[1], 0);
+		descs[0] = vld1q_lane_u64((uint64_t *)(rxdp), descs[0], 0);
 
 		/* B.2 copy 2 mbuf point into rx_pkts  */
 		vst1q_u64((uint64_t *)&rx_pkts[pos + 2], mbp2);
@@ -308,16 +315,19 @@ _recv_raw_pkts_vec(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
 			rte_mbuf_prefetch_part2(rx_pkts[pos + 3]);
 		}
 
-		/* avoid compiler reorder optimization */
-		rte_compiler_barrier();
-
 		/* pkt 3,4 shift the pktlen field to be 16-bit aligned*/
 		uint32x4_t len3 = vshlq_u32(vreinterpretq_u32_u64(descs[3]),
 					    len_shl);
-		descs[3] = vreinterpretq_u64_u32(len3);
+		descs[3] = vreinterpretq_u64_u16(vsetq_lane_u16
+				(vgetq_lane_u16(vreinterpretq_u16_u32(len3), 7),
+				 vreinterpretq_u16_u64(descs[3]),
+				 7));
 		uint32x4_t len2 = vshlq_u32(vreinterpretq_u32_u64(descs[2]),
 					    len_shl);
-		descs[2] = vreinterpretq_u64_u32(len2);
+		descs[2] = vreinterpretq_u64_u16(vsetq_lane_u16
+				(vgetq_lane_u16(vreinterpretq_u16_u32(len2), 7),
+				 vreinterpretq_u16_u64(descs[2]),
+				 7));
 
 		/* D.1 pkt 3,4 convert format from desc to pktmbuf */
 		pkt_mb4 = vqtbl1q_u8(vreinterpretq_u8_u64(descs[3]), shuf_msk);
@@ -345,10 +355,16 @@ _recv_raw_pkts_vec(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
 		/* pkt 1,2 shift the pktlen field to be 16-bit aligned*/
 		uint32x4_t len1 = vshlq_u32(vreinterpretq_u32_u64(descs[1]),
 					    len_shl);
-		descs[1] = vreinterpretq_u64_u32(len1);
+		descs[1] = vreinterpretq_u64_u16(vsetq_lane_u16
+				(vgetq_lane_u16(vreinterpretq_u16_u32(len1), 7),
+				 vreinterpretq_u16_u64(descs[1]),
+				 7));
 		uint32x4_t len0 = vshlq_u32(vreinterpretq_u32_u64(descs[0]),
 					    len_shl);
-		descs[0] = vreinterpretq_u64_u32(len0);
+		descs[0] = vreinterpretq_u64_u16(vsetq_lane_u16
+				(vgetq_lane_u16(vreinterpretq_u16_u32(len0), 7),
+				 vreinterpretq_u16_u64(descs[0]),
+				 7));
 
 		/* D.1 pkt 1,2 convert format from desc to pktmbuf */
 		pkt_mb2 = vqtbl1q_u8(vreinterpretq_u8_u64(descs[1]), shuf_msk);
@@ -379,7 +395,7 @@ _recv_raw_pkts_vec(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
 			eop_bits = vmvnq_u8(vreinterpretq_u8_u16(staterr));
 			eop_bits = vandq_u8(eop_bits, eop_check);
 			/* the staterr values are not in order, as the count
-			 * count of dd bits doesn't care. However, for end of
+			 * of dd bits doesn't care. However, for end of
 			 * packet tracking, we do care, so shuffle. This also
 			 * compresses the 32-bit values to 8-bit
 			 */
@@ -411,7 +427,7 @@ _recv_raw_pkts_vec(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
 		vst1q_u8((void *)&rx_pkts[pos]->rx_descriptor_fields1,
 			 pkt_mb1);
 		desc_to_ptype_v(descs, &rx_pkts[pos], ptype_tbl);
-		/* C.4 calc avaialbe number of desc */
+		/* C.4 calc available number of desc */
 		if (unlikely(stat == 0)) {
 			nb_pkts_recd += RTE_I40E_DESCS_PER_LOOP;
 		} else {
@@ -435,21 +451,21 @@ _recv_raw_pkts_vec(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
  *   numbers of DD bits
  */
 uint16_t
-i40e_recv_pkts_vec(void *rx_queue, struct rte_mbuf **rx_pkts,
-		   uint16_t nb_pkts)
+i40e_recv_pkts_vec(void *__rte_restrict rx_queue,
+		struct rte_mbuf **__rte_restrict rx_pkts, uint16_t nb_pkts)
 {
 	return _recv_raw_pkts_vec(rx_queue, rx_pkts, nb_pkts, NULL);
 }
 
- /* vPMD receive routine that reassembles scattered packets
+/**
+ * vPMD receive routine that reassembles single burst of 32 scattered packets
+ *
  * Notice:
  * - nb_pkts < RTE_I40E_DESCS_PER_LOOP, just return no packet
- * - nb_pkts > RTE_I40E_VPMD_RX_BURST, only scan RTE_I40E_VPMD_RX_BURST
- *   numbers of DD bits
  */
-uint16_t
-i40e_recv_scattered_pkts_vec(void *rx_queue, struct rte_mbuf **rx_pkts,
-			     uint16_t nb_pkts)
+static uint16_t
+i40e_recv_scattered_burst_vec(void *rx_queue, struct rte_mbuf **rx_pkts,
+			      uint16_t nb_pkts)
 {
 
 	struct i40e_rx_queue *rxq = rx_queue;
@@ -478,9 +494,36 @@ i40e_recv_scattered_pkts_vec(void *rx_queue, struct rte_mbuf **rx_pkts,
 			i++;
 		if (i == nb_bufs)
 			return nb_bufs;
+		rxq->pkt_first_seg = rx_pkts[i];
 	}
 	return i + reassemble_packets(rxq, &rx_pkts[i], nb_bufs - i,
 		&split_flags[i]);
+}
+
+/**
+ * vPMD receive routine that reassembles scattered packets.
+ */
+uint16_t
+i40e_recv_scattered_pkts_vec(void *rx_queue, struct rte_mbuf **rx_pkts,
+			     uint16_t nb_pkts)
+{
+	uint16_t retval = 0;
+
+	while (nb_pkts > RTE_I40E_VPMD_RX_BURST) {
+		uint16_t burst;
+
+		burst = i40e_recv_scattered_burst_vec(rx_queue,
+						      rx_pkts + retval,
+						      RTE_I40E_VPMD_RX_BURST);
+		retval += burst;
+		nb_pkts -= burst;
+		if (burst < RTE_I40E_VPMD_RX_BURST)
+			return retval;
+	}
+
+	return retval + i40e_recv_scattered_burst_vec(rx_queue,
+						      rx_pkts + retval,
+						      nb_pkts);
 }
 
 static inline void
@@ -496,8 +539,8 @@ vtx1(volatile struct i40e_tx_desc *txdp,
 }
 
 static inline void
-vtx(volatile struct i40e_tx_desc *txdp,
-		struct rte_mbuf **pkt, uint16_t nb_pkts,  uint64_t flags)
+vtx(volatile struct i40e_tx_desc *txdp, struct rte_mbuf **pkt,
+		uint16_t nb_pkts,  uint64_t flags)
 {
 	int i;
 
@@ -506,8 +549,8 @@ vtx(volatile struct i40e_tx_desc *txdp,
 }
 
 uint16_t
-i40e_xmit_fixed_burst_vec(void *tx_queue, struct rte_mbuf **tx_pkts,
-			  uint16_t nb_pkts)
+i40e_xmit_fixed_burst_vec(void *__rte_restrict tx_queue,
+	struct rte_mbuf **__rte_restrict tx_pkts, uint16_t nb_pkts)
 {
 	struct i40e_tx_queue *txq = (struct i40e_tx_queue *)tx_queue;
 	volatile struct i40e_tx_desc *txdp;
@@ -567,30 +610,31 @@ i40e_xmit_fixed_burst_vec(void *tx_queue, struct rte_mbuf **tx_pkts,
 
 	txq->tx_tail = tx_id;
 
-	I40E_PCI_REG_WRITE(txq->qtx_tail, txq->tx_tail);
+	rte_io_wmb();
+	I40E_PCI_REG_WRITE_RELAXED(txq->qtx_tail, tx_id);
 
 	return nb_pkts;
 }
 
-void __attribute__((cold))
+void __rte_cold
 i40e_rx_queue_release_mbufs_vec(struct i40e_rx_queue *rxq)
 {
 	_i40e_rx_queue_release_mbufs_vec(rxq);
 }
 
-int __attribute__((cold))
+int __rte_cold
 i40e_rxq_vec_setup(struct i40e_rx_queue *rxq)
 {
 	return i40e_rxq_vec_setup_default(rxq);
 }
 
-int __attribute__((cold))
+int __rte_cold
 i40e_txq_vec_setup(struct i40e_tx_queue __rte_unused *txq)
 {
 	return 0;
 }
 
-int __attribute__((cold))
+int __rte_cold
 i40e_rx_vec_dev_conf_condition_check(struct rte_eth_dev *dev)
 {
 	return i40e_rx_vec_dev_conf_condition_check_default(dev);

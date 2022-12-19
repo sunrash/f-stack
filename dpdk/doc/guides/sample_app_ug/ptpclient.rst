@@ -21,7 +21,7 @@ The PTP sample application is intended as a simple reference implementation of
 a PTP client using the DPDK IEEE1588 API.
 In order to keep the application simple the following assumptions are made:
 
-* The first discovered master is the master for the session.
+* The first discovered master is the main for the session.
 * Only L2 PTP packets are supported.
 * Only the PTP v2 protocol is supported.
 * Only the slave clock is implemented.
@@ -57,22 +57,15 @@ To compile the sample application see :doc:`compiling`.
 
 The application is located in the ``ptpclient`` sub-directory.
 
-.. note::
-   To compile the application edit the ``config/common_linuxapp`` configuration file to enable IEEE1588
-   and then recompile DPDK:
-
-   .. code-block:: console
-
-      CONFIG_RTE_LIBRTE_IEEE1588=y
 
 Running the Application
 -----------------------
 
-To run the example in a ``linuxapp`` environment:
+To run the example in a ``linux`` environment:
 
 .. code-block:: console
 
-    ./build/ptpclient -l 1 -n 4 -- -p 0x1 -T 0
+    ./<build_dir>/examples/dpdk-ptpclient -l 1 -n 4 -- -p 0x1 -T 0
 
 Refer to *DPDK Getting Started Guide* for general information on running
 applications and the Environment Abstraction Layer (EAL) options.
@@ -212,17 +205,17 @@ PTP IEEE1588 L2 functionality.
     void
     parse_ptp_frames(uint16_t portid, struct rte_mbuf *m) {
         struct ptp_header *ptp_hdr;
-        struct ether_hdr *eth_hdr;
+        struct rte_ether_hdr *eth_hdr;
         uint16_t eth_type;
 
-        eth_hdr = rte_pktmbuf_mtod(m, struct ether_hdr *);
+        eth_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
         eth_type = rte_be_to_cpu_16(eth_hdr->ether_type);
 
         if (eth_type == PTP_PROTOCOL) {
             ptp_data.m = m;
             ptp_data.portid = portid;
             ptp_hdr = (struct ptp_header *)(rte_pktmbuf_mtod(m, char *)
-                        + sizeof(struct ether_hdr));
+                        + sizeof(struct rte_ether_hdr));
 
             switch (ptp_hdr->msgtype) {
             case SYNC:

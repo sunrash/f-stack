@@ -110,30 +110,8 @@ struct rte_ip_frag_tbl {
 	__extension__ struct ip_frag_pkt pkt[0]; /**< hash table. */
 };
 
-/** IPv6 fragment extension header */
-#define	RTE_IPV6_EHDR_MF_SHIFT			0
-#define	RTE_IPV6_EHDR_MF_MASK			1
-#define	RTE_IPV6_EHDR_FO_SHIFT			3
-#define	RTE_IPV6_EHDR_FO_MASK			(~((1 << RTE_IPV6_EHDR_FO_SHIFT) - 1))
-#define	RTE_IPV6_EHDR_FO_ALIGN			(1 << RTE_IPV6_EHDR_FO_SHIFT)
-
-#define RTE_IPV6_FRAG_USED_MASK			\
-	(RTE_IPV6_EHDR_MF_MASK | RTE_IPV6_EHDR_FO_MASK)
-
-#define RTE_IPV6_GET_MF(x)				((x) & RTE_IPV6_EHDR_MF_MASK)
-#define RTE_IPV6_GET_FO(x)				((x) >> RTE_IPV6_EHDR_FO_SHIFT)
-
-#define RTE_IPV6_SET_FRAG_DATA(fo, mf)	\
-	(((fo) & RTE_IPV6_EHDR_FO_MASK) | ((mf) & RTE_IPV6_EHDR_MF_MASK))
-
-struct ipv6_extension_fragment {
-	uint8_t next_header;            /**< Next header type */
-	uint8_t reserved;               /**< Reserved */
-	uint16_t frag_data;             /**< All fragmentation data */
-	uint32_t id;                    /**< Packet ID */
-} __attribute__((__packed__));
-
-
+/* struct ipv6_extension_fragment moved to librte_net/rte_ip.h and renamed. */
+#define ipv6_extension_fragment	rte_ipv6_fragment_ext
 
 /**
  * Create a new IP fragmentation table.
@@ -219,7 +197,7 @@ rte_ipv6_fragment_packet(struct rte_mbuf *pkt_in,
  */
 struct rte_mbuf *rte_ipv6_frag_reassemble_packet(struct rte_ip_frag_tbl *tbl,
 		struct rte_ip_frag_death_row *dr,
-		struct rte_mbuf *mb, uint64_t tms, struct ipv6_hdr *ip_hdr,
+		struct rte_mbuf *mb, uint64_t tms, struct rte_ipv6_hdr *ip_hdr,
 		struct ipv6_extension_fragment *frag_hdr);
 
 /**
@@ -234,7 +212,7 @@ struct rte_mbuf *rte_ipv6_frag_reassemble_packet(struct rte_ip_frag_tbl *tbl,
  *   present.
  */
 static inline struct ipv6_extension_fragment *
-rte_ipv6_frag_get_ipv6_fragment_header(struct ipv6_hdr *hdr)
+rte_ipv6_frag_get_ipv6_fragment_header(struct rte_ipv6_hdr *hdr)
 {
 	if (hdr->proto == IPPROTO_FRAGMENT) {
 		return (struct ipv6_extension_fragment *) ++hdr;
@@ -293,7 +271,7 @@ int32_t rte_ipv4_fragment_packet(struct rte_mbuf *pkt_in,
  */
 struct rte_mbuf * rte_ipv4_frag_reassemble_packet(struct rte_ip_frag_tbl *tbl,
 		struct rte_ip_frag_death_row *dr,
-		struct rte_mbuf *mb, uint64_t tms, struct ipv4_hdr *ip_hdr);
+		struct rte_mbuf *mb, uint64_t tms, struct rte_ipv4_hdr *ip_hdr);
 
 /**
  * Check if the IPv4 packet is fragmented
@@ -304,12 +282,13 @@ struct rte_mbuf * rte_ipv4_frag_reassemble_packet(struct rte_ip_frag_tbl *tbl,
  *   1 if fragmented, 0 if not fragmented
  */
 static inline int
-rte_ipv4_frag_pkt_is_fragmented(const struct ipv4_hdr * hdr) {
+rte_ipv4_frag_pkt_is_fragmented(const struct rte_ipv4_hdr *hdr)
+{
 	uint16_t flag_offset, ip_flag, ip_ofs;
 
 	flag_offset = rte_be_to_cpu_16(hdr->fragment_offset);
-	ip_ofs = (uint16_t)(flag_offset & IPV4_HDR_OFFSET_MASK);
-	ip_flag = (uint16_t)(flag_offset & IPV4_HDR_MF_FLAG);
+	ip_ofs = (uint16_t)(flag_offset & RTE_IPV4_HDR_OFFSET_MASK);
+	ip_flag = (uint16_t)(flag_offset & RTE_IPV4_HDR_MF_FLAG);
 
 	return ip_flag != 0 || ip_ofs  != 0;
 }
@@ -347,7 +326,8 @@ rte_ip_frag_table_statistics_dump(FILE * f, const struct rte_ip_frag_tbl *tbl);
  * @param tms
  *   Current timestamp
  */
-void __rte_experimental
+__rte_experimental
+void
 rte_frag_table_del_expired_entries(struct rte_ip_frag_tbl *tbl,
 	struct rte_ip_frag_death_row *dr, uint64_t tms);
 

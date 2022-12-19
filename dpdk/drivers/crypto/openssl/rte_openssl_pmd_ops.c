@@ -2,13 +2,15 @@
  * Copyright(c) 2016-2017 Intel Corporation
  */
 
+#define OPENSSL_API_COMPAT 0x10100000L
+
 #include <string.h>
 
 #include <rte_common.h>
 #include <rte_malloc.h>
 #include <rte_cryptodev_pmd.h>
 
-#include "rte_openssl_pmd_private.h"
+#include "openssl_pmd_private.h"
 #include "compat.h"
 
 
@@ -715,7 +717,7 @@ openssl_pmd_qp_create_processed_ops_ring(struct openssl_qp *qp,
 static int
 openssl_pmd_qp_setup(struct rte_cryptodev *dev, uint16_t qp_id,
 		const struct rte_cryptodev_qp_conf *qp_conf,
-		int socket_id, struct rte_mempool *session_pool)
+		int socket_id)
 {
 	struct openssl_qp *qp = NULL;
 
@@ -740,7 +742,8 @@ openssl_pmd_qp_setup(struct rte_cryptodev *dev, uint16_t qp_id,
 	if (qp->processed_ops == NULL)
 		goto qp_setup_cleanup;
 
-	qp->sess_mp = session_pool;
+	qp->sess_mp = qp_conf->mp_session;
+	qp->sess_mp_priv = qp_conf->mp_session_private;
 
 	memset(&qp->stats, 0, sizeof(qp->stats));
 
@@ -751,13 +754,6 @@ qp_setup_cleanup:
 		rte_free(qp);
 
 	return -1;
-}
-
-/** Return the number of allocated queue pairs */
-static uint32_t
-openssl_pmd_qp_count(struct rte_cryptodev *dev)
-{
-	return dev->data->nb_queue_pairs;
 }
 
 /** Returns the size of the symmetric session structure */
@@ -1241,7 +1237,6 @@ struct rte_cryptodev_ops openssl_pmd_ops = {
 
 		.queue_pair_setup	= openssl_pmd_qp_setup,
 		.queue_pair_release	= openssl_pmd_qp_release,
-		.queue_pair_count	= openssl_pmd_qp_count,
 
 		.sym_session_get_size	= openssl_pmd_sym_session_get_size,
 		.asym_session_get_size	= openssl_pmd_asym_session_get_size,

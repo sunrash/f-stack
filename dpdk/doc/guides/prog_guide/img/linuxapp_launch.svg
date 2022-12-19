@@ -17,9 +17,9 @@
    id="svg2"
    sodipodi:version="0.32"
    inkscape:version="0.48.4 r9939"
-   sodipodi:docname="linuxapp_launch.svg"
+   sodipodi:docname="linux_launch.svg"
    inkscape:output_extension="org.inkscape.output.svg.inkscape"
-   inkscape:export-filename="/home/matz/rapports/doc/intel/architecture_docs/linuxapp_launch.png"
+   inkscape:export-filename="/home/matz/rapports/doc/intel/architecture_docs/linux_launch.png"
    inkscape:export-xdpi="90"
    inkscape:export-ydpi="90"
    version="1.1">
@@ -170,7 +170,7 @@
          sodipodi:role="line"
          id="tspan3165"
          x="114.71806"
-         y="46.6479">Master lcore</tspan></text>
+         y="46.6479">main lcore</tspan></text>
     <text
        xml:space="preserve"
        style="font-size:20px;font-style:normal;font-weight:normal;fill:#000000;fill-opacity:1;stroke:none;font-family:Bitstream Vera Sans"

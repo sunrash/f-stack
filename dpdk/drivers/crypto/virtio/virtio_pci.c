@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 
-#ifdef RTE_EXEC_ENV_LINUXAPP
+#ifdef RTE_EXEC_ENV_LINUX
  #include <dirent.h>
  #include <fcntl.h>
 #endif
@@ -31,7 +31,7 @@
 #define VIRTIO_PCI_CONFIG(hw) \
 		(((hw)->use_msix == VIRTIO_MSIX_ENABLED) ? 24 : 20)
 
-struct virtio_hw_internal virtio_hw_internal[RTE_MAX_VIRTIO_CRYPTO];
+struct virtio_hw_internal crypto_virtio_hw_internal[RTE_MAX_VIRTIO_CRYPTO];
 
 static inline int
 check_vq_phys_addr_ok(struct virtqueue *vq)
@@ -438,7 +438,7 @@ next:
  * Return -1:
  *   if there is error mapping with VFIO/UIO.
  *   if port map error when driver type is KDRV_NONE.
- *   if whitelisted but driver type is KDRV_UNKNOWN.
+ *   if marked as allowed but driver type is KDRV_UNKNOWN.
  * Return 1 if kernel driver is managing the device.
  * Return 0 on success.
  */
@@ -452,7 +452,7 @@ vtpci_cryptodev_init(struct rte_pci_device *dev, struct virtio_crypto_hw *hw)
 	 */
 	if (virtio_read_caps(dev, hw) == 0) {
 		VIRTIO_CRYPTO_INIT_LOG_INFO("modern virtio pci detected.");
-		virtio_hw_internal[hw->dev_id].vtpci_ops =
+		crypto_virtio_hw_internal[hw->dev_id].vtpci_ops =
 					&virtio_crypto_modern_ops;
 		hw->modern = 1;
 		return 0;

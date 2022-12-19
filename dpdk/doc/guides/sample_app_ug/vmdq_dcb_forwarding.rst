@@ -26,13 +26,13 @@ multiple queues. When run with 8 threads, that is, with the -c FF option, each t
 As supplied, the sample application configures the VMDQ feature to have 32 pools with 4 queues each as indicated in :numref:`figure_vmdq_dcb_example`.
 The Intel® 82599 10 Gigabit Ethernet Controller NIC also supports the splitting of traffic into 16 pools of 8 queues. While the
 Intel® X710 or XL710 Ethernet Controller NICs support many configurations of VMDQ pools of 4 or 8 queues each. For simplicity, only 16
-or 32 pools is supported in this sample. And queues numbers for each VMDQ pool can be changed by setting CONFIG_RTE_LIBRTE_I40E_QUEUE_NUM_PER_VM
-in config/common_* file.
+or 32 pools is supported in this sample. And queues numbers for each VMDQ pool can be changed by setting RTE_LIBRTE_I40E_QUEUE_NUM_PER_VM
+in config/rte_config.h file.
 The nb-pools, nb-tcs and enable-rss parameters can be passed on the command line, after the EAL parameters:
 
 .. code-block:: console
 
-    ./build/vmdq_dcb [EAL options] -- -p PORTMASK --nb-pools NP --nb-tcs TC --enable-rss
+    ./<build_dir>/examples/dpdk-vmdq_dcb [EAL options] -- -p PORTMASK --nb-pools NP --nb-tcs TC --enable-rss
 
 where, NP can be 16 or 32, TC can be 4 or 8, rss is disabled by default.
 
@@ -68,11 +68,11 @@ The application is located in the ``vmdq_dcb`` sub-directory.
 Running the Application
 -----------------------
 
-To run the example in a linuxapp environment:
+To run the example in a linux environment:
 
 .. code-block:: console
 
-    user@target:~$ ./build/vmdq_dcb -l 0-3 -n 4 -- -p 0x3 --nb-pools 32 --nb-tcs 4
+    user@target:~$ ./<build_dir>/examples/dpdk-vmdq_dcb -l 0-3 -n 4 -- -p 0x3 --nb-pools 32 --nb-tcs 4
 
 Refer to the *DPDK Getting Started Guide* for general information on running applications and
 the Environment Abstraction Layer (EAL) options.
@@ -165,7 +165,7 @@ the MAC of VMDQ pool 2 on port 1 is 52:54:00:12:01:02.
     };
 
     /* pool mac addr template, pool mac addr is like: 52 54 00 12 port# pool# */
-    static struct ether_addr pool_addr_template = {
+    static struct rte_ether_addr pool_addr_template = {
         .addr_bytes = {0x52, 0x54, 0x00, 0x12, 0x00, 0x00}
     };
 
@@ -225,7 +225,7 @@ the MAC of VMDQ pool 2 on port 1 is 52:54:00:12:01:02.
 
     /* Set mac for each pool.*/
     for (q = 0; q < num_pools; q++) {
-        struct ether_addr mac;
+        struct rte_ether_addr mac;
         mac = pool_addr_template;
         mac.addr_bytes[4] = port;
         mac.addr_bytes[5] = q;
@@ -250,7 +250,7 @@ See :doc:`l2_forward_real_virtual` for more information.
 Statistics Display
 ~~~~~~~~~~~~~~~~~~
 
-When run in a linuxapp environment,
+When run in a linux environment,
 the VMDQ and DCB Forwarding sample application can display statistics showing the number of packets read from each RX queue.
 This is provided by way of a signal handler for the SIGHUP signal,
 which simply prints to standard output the packet counts in grid form.

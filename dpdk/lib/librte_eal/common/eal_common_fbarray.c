@@ -5,15 +5,16 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
-#include <sys/mman.h>
 #include <stdint.h>
 #include <errno.h>
-#include <sys/file.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <rte_common.h>
-#include <rte_log.h>
+#include <rte_eal_paging.h>
 #include <rte_errno.h>
+#include <rte_log.h>
+#include <rte_memory.h>
 #include <rte_spinlock.h>
 #include <rte_tailq.h>
 
@@ -27,6 +28,22 @@
 #define MASK_LEN_TO_IDX(x) ((x) >> MASK_SHIFT)
 #define MASK_LEN_TO_MOD(x) ((x) - RTE_ALIGN_FLOOR(x, MASK_ALIGN))
 #define MASK_GET_IDX(idx, mod) ((idx << MASK_SHIFT) + mod)
+
+/*
+ * We use this to keep track of created/attached memory areas to prevent user
+ * errors in API usage.
+ */
+struct mem_area {
+	TAILQ_ENTRY(mem_area) next;
+	void *addr;
+	size_t len;
+	int fd;
+};
+TAILQ_HEAD(mem_area_head, mem_area);
+/* local per-process tailq */
+static struct mem_area_head mem_area_tailq =
+	TAILQ_HEAD_INITIALIZER(mem_area_tailq);
+static rte_spinlock_t mem_area_lock = RTE_SPINLOCK_INITIALIZER;
 
 /*
  * This is a mask that is always stored at the end of array, to provide fast
@@ -64,26 +81,36 @@ get_used_mask(void *data, unsigned int elt_sz, unsigned int len)
 }
 
 static int
-resize_and_map(int fd, void *addr, size_t len)
+resize_and_map(int fd, const char *path, void *addr, size_t len)
 {
-	char path[PATH_MAX];
 	void *map_addr;
 
-	if (ftruncate(fd, len)) {
+	if (eal_file_truncate(fd, len)) {
 		RTE_LOG(ERR, EAL, "Cannot truncate %s\n", path);
-		/* pass errno up the chain */
-		rte_errno = errno;
 		return -1;
 	}
 
-	map_addr = mmap(addr, len, PROT_READ | PROT_WRITE,
-			MAP_SHARED | MAP_FIXED, fd, 0);
+	map_addr = rte_mem_map(addr, len, RTE_PROT_READ | RTE_PROT_WRITE,
+			RTE_MAP_SHARED | RTE_MAP_FORCE_ADDRESS, fd, 0);
 	if (map_addr != addr) {
-		RTE_LOG(ERR, EAL, "mmap() failed: %s\n", strerror(errno));
-		/* pass errno up the chain */
-		rte_errno = errno;
 		return -1;
 	}
+	return 0;
+}
+
+static int
+overlap(const struct mem_area *ma, const void *start, size_t len)
+{
+	const void *end = RTE_PTR_ADD(start, len);
+	const void *ma_start = ma->addr;
+	const void *ma_end = RTE_PTR_ADD(ma->addr, ma->len);
+
+	/* start overlap? */
+	if (start >= ma_start && start < ma_end)
+		return 1;
+	/* end overlap? */
+	if (end > ma_start && end < ma_end)
+		return 1;
 	return 0;
 }
 
@@ -677,15 +704,18 @@ fully_validate(const char *name, unsigned int elt_sz, unsigned int len)
 	return 0;
 }
 
-int __rte_experimental
+int
 rte_fbarray_init(struct rte_fbarray *arr, const char *name, unsigned int len,
 		unsigned int elt_sz)
 {
 	size_t page_sz, mmap_len;
 	char path[PATH_MAX];
 	struct used_mask *msk;
+	struct mem_area *ma = NULL;
 	void *data = NULL;
 	int fd = -1;
+	const struct internal_config *internal_conf =
+		eal_get_internal_configuration();
 
 	if (arr == NULL) {
 		rte_errno = EINVAL;
@@ -695,24 +725,41 @@ rte_fbarray_init(struct rte_fbarray *arr, const char *name, unsigned int len,
 	if (fully_validate(name, elt_sz, len))
 		return -1;
 
-	page_sz = sysconf(_SC_PAGESIZE);
-	if (page_sz == (size_t)-1)
-		goto fail;
+	/* allocate mem area before doing anything */
+	ma = malloc(sizeof(*ma));
+	if (ma == NULL) {
+		rte_errno = ENOMEM;
+		return -1;
+	}
+
+	page_sz = rte_mem_page_size();
+	if (page_sz == (size_t)-1) {
+		free(ma);
+		return -1;
+	}
 
 	/* calculate our memory limits */
 	mmap_len = calc_data_size(page_sz, elt_sz, len);
 
 	data = eal_get_virtual_area(NULL, &mmap_len, page_sz, 0, 0);
-	if (data == NULL)
-		goto fail;
+	if (data == NULL) {
+		free(ma);
+		return -1;
+	}
 
-	if (internal_config.no_shconf) {
+	rte_spinlock_lock(&mem_area_lock);
+
+	fd = -1;
+
+	if (internal_conf->no_shconf) {
 		/* remap virtual area as writable */
-		void *new_data = mmap(data, mmap_len, PROT_READ | PROT_WRITE,
-				MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-		if (new_data == MAP_FAILED) {
+		static const int flags = RTE_MAP_FORCE_ADDRESS |
+			RTE_MAP_PRIVATE | RTE_MAP_ANONYMOUS;
+		void *new_data = rte_mem_map(data, mmap_len,
+			RTE_PROT_READ | RTE_PROT_WRITE, flags, fd, 0);
+		if (new_data == NULL) {
 			RTE_LOG(DEBUG, EAL, "%s(): couldn't remap anonymous memory: %s\n",
-					__func__, strerror(errno));
+					__func__, rte_strerror(rte_errno));
 			goto fail;
 		}
 	} else {
@@ -724,15 +771,15 @@ rte_fbarray_init(struct rte_fbarray *arr, const char *name, unsigned int len,
 		 * and see if we succeed. If we don't, someone else is using it
 		 * already.
 		 */
-		fd = open(path, O_CREAT | O_RDWR, 0600);
+		fd = eal_file_open(path, EAL_OPEN_CREATE | EAL_OPEN_READWRITE);
 		if (fd < 0) {
 			RTE_LOG(DEBUG, EAL, "%s(): couldn't open %s: %s\n",
-					__func__, path, strerror(errno));
-			rte_errno = errno;
+				__func__, path, rte_strerror(rte_errno));
 			goto fail;
-		} else if (flock(fd, LOCK_EX | LOCK_NB)) {
+		} else if (eal_file_lock(
+				fd, EAL_FLOCK_EXCLUSIVE, EAL_FLOCK_RETURN)) {
 			RTE_LOG(DEBUG, EAL, "%s(): couldn't lock %s: %s\n",
-					__func__, path, strerror(errno));
+				__func__, path, rte_strerror(rte_errno));
 			rte_errno = EBUSY;
 			goto fail;
 		}
@@ -741,17 +788,18 @@ rte_fbarray_init(struct rte_fbarray *arr, const char *name, unsigned int len,
 		 * still attach to it, but no other process could reinitialize
 		 * it.
 		 */
-		if (flock(fd, LOCK_SH | LOCK_NB)) {
-			rte_errno = errno;
-			goto fail;
-		}
-
-		if (resize_and_map(fd, data, mmap_len))
+		if (eal_file_lock(fd, EAL_FLOCK_SHARED, EAL_FLOCK_RETURN))
 			goto fail;
 
-		/* we've mmap'ed the file, we can now close the fd */
-		close(fd);
+		if (resize_and_map(fd, path, data, mmap_len))
+			goto fail;
 	}
+	ma->addr = data;
+	ma->len = mmap_len;
+	ma->fd = fd;
+
+	/* do not close fd - keep it until detach/destroy */
+	TAILQ_INSERT_TAIL(&mem_area_tailq, ma, next);
 
 	/* initialize the data */
 	memset(data, 0, mmap_len);
@@ -768,18 +816,24 @@ rte_fbarray_init(struct rte_fbarray *arr, const char *name, unsigned int len,
 
 	rte_rwlock_init(&arr->rwlock);
 
+	rte_spinlock_unlock(&mem_area_lock);
+
 	return 0;
 fail:
 	if (data)
-		munmap(data, mmap_len);
+		rte_mem_unmap(data, mmap_len);
 	if (fd >= 0)
 		close(fd);
+	free(ma);
+
+	rte_spinlock_unlock(&mem_area_lock);
 	return -1;
 }
 
-int __rte_experimental
+int
 rte_fbarray_attach(struct rte_fbarray *arr)
 {
+	struct mem_area *ma = NULL, *tmp = NULL;
 	size_t page_sz, mmap_len;
 	char path[PATH_MAX];
 	void *data = NULL;
@@ -799,11 +853,31 @@ rte_fbarray_attach(struct rte_fbarray *arr)
 	if (fully_validate(arr->name, arr->elt_sz, arr->len))
 		return -1;
 
-	page_sz = sysconf(_SC_PAGESIZE);
-	if (page_sz == (size_t)-1)
-		goto fail;
+	ma = malloc(sizeof(*ma));
+	if (ma == NULL) {
+		rte_errno = ENOMEM;
+		return -1;
+	}
+
+	page_sz = rte_mem_page_size();
+	if (page_sz == (size_t)-1) {
+		free(ma);
+		return -1;
+	}
 
 	mmap_len = calc_data_size(page_sz, arr->elt_sz, arr->len);
+
+	/* check the tailq - maybe user has already mapped this address space */
+	rte_spinlock_lock(&mem_area_lock);
+
+	TAILQ_FOREACH(tmp, &mem_area_tailq, next) {
+		if (overlap(tmp, arr->data, mmap_len)) {
+			rte_errno = EEXIST;
+			goto fail;
+		}
+	}
+
+	/* we know this memory area is unique, so proceed */
 
 	data = eal_get_virtual_area(arr->data, &mmap_len, page_sz, 0, 0);
 	if (data == NULL)
@@ -811,37 +885,46 @@ rte_fbarray_attach(struct rte_fbarray *arr)
 
 	eal_get_fbarray_path(path, sizeof(path), arr->name);
 
-	fd = open(path, O_RDWR);
+	fd = eal_file_open(path, EAL_OPEN_READWRITE);
 	if (fd < 0) {
-		rte_errno = errno;
 		goto fail;
 	}
 
 	/* lock the file, to let others know we're using it */
-	if (flock(fd, LOCK_SH | LOCK_NB)) {
-		rte_errno = errno;
-		goto fail;
-	}
-
-	if (resize_and_map(fd, data, mmap_len))
+	if (eal_file_lock(fd, EAL_FLOCK_SHARED, EAL_FLOCK_RETURN))
 		goto fail;
 
-	close(fd);
+	if (resize_and_map(fd, path, data, mmap_len))
+		goto fail;
+
+	/* store our new memory area */
+	ma->addr = data;
+	ma->fd = fd; /* keep fd until detach/destroy */
+	ma->len = mmap_len;
+
+	TAILQ_INSERT_TAIL(&mem_area_tailq, ma, next);
 
 	/* we're done */
 
+	rte_spinlock_unlock(&mem_area_lock);
 	return 0;
 fail:
 	if (data)
-		munmap(data, mmap_len);
+		rte_mem_unmap(data, mmap_len);
 	if (fd >= 0)
 		close(fd);
+	free(ma);
+	rte_spinlock_unlock(&mem_area_lock);
 	return -1;
 }
 
-int __rte_experimental
+int
 rte_fbarray_detach(struct rte_fbarray *arr)
 {
+	struct mem_area *tmp = NULL;
+	size_t mmap_len;
+	int ret = -1;
+
 	if (arr == NULL) {
 		rte_errno = EINVAL;
 		return -1;
@@ -855,58 +938,126 @@ rte_fbarray_detach(struct rte_fbarray *arr)
 	 * really do anything about it, things will blow up either way.
 	 */
 
-	size_t page_sz = sysconf(_SC_PAGESIZE);
-
+	size_t page_sz = rte_mem_page_size();
 	if (page_sz == (size_t)-1)
 		return -1;
 
-	/* this may already be unmapped (e.g. repeated call from previously
-	 * failed destroy(), but this is on user, we can't (easily) know if this
-	 * is still mapped.
-	 */
-	munmap(arr->data, calc_data_size(page_sz, arr->elt_sz, arr->len));
+	mmap_len = calc_data_size(page_sz, arr->elt_sz, arr->len);
 
-	return 0;
-}
+	/* does this area exist? */
+	rte_spinlock_lock(&mem_area_lock);
 
-int __rte_experimental
-rte_fbarray_destroy(struct rte_fbarray *arr)
-{
-	int fd, ret;
-	char path[PATH_MAX];
-
-	ret = rte_fbarray_detach(arr);
-	if (ret)
-		return ret;
-
-	/* with no shconf, there were never any files to begin with */
-	if (internal_config.no_shconf)
-		return 0;
-
-	/* try deleting the file */
-	eal_get_fbarray_path(path, sizeof(path), arr->name);
-
-	fd = open(path, O_RDONLY);
-	if (fd < 0) {
-		RTE_LOG(ERR, EAL, "Could not open fbarray file: %s\n",
-			strerror(errno));
-		return -1;
+	TAILQ_FOREACH(tmp, &mem_area_tailq, next) {
+		if (tmp->addr == arr->data && tmp->len == mmap_len)
+			break;
 	}
-	if (flock(fd, LOCK_EX | LOCK_NB)) {
-		RTE_LOG(DEBUG, EAL, "Cannot destroy fbarray - another process is using it\n");
-		rte_errno = EBUSY;
+	if (tmp == NULL) {
+		rte_errno = ENOENT;
 		ret = -1;
-	} else {
-		ret = 0;
-		unlink(path);
-		memset(arr, 0, sizeof(*arr));
+		goto out;
 	}
-	close(fd);
 
+	rte_mem_unmap(arr->data, mmap_len);
+
+	/* area is unmapped, close fd and remove the tailq entry */
+	if (tmp->fd >= 0)
+		close(tmp->fd);
+	TAILQ_REMOVE(&mem_area_tailq, tmp, next);
+	free(tmp);
+
+	ret = 0;
+out:
+	rte_spinlock_unlock(&mem_area_lock);
 	return ret;
 }
 
-void * __rte_experimental
+int
+rte_fbarray_destroy(struct rte_fbarray *arr)
+{
+	struct mem_area *tmp = NULL;
+	size_t mmap_len;
+	int fd, ret;
+	char path[PATH_MAX];
+	const struct internal_config *internal_conf =
+		eal_get_internal_configuration();
+
+	if (arr == NULL) {
+		rte_errno = EINVAL;
+		return -1;
+	}
+
+	/*
+	 * we don't need to synchronize detach as two values we need (element
+	 * size and total capacity) are constant for the duration of life of
+	 * the array, so the parts we care about will not race. if the user is
+	 * detaching while doing something else in the same process, we can't
+	 * really do anything about it, things will blow up either way.
+	 */
+
+	size_t page_sz = rte_mem_page_size();
+	if (page_sz == (size_t)-1)
+		return -1;
+
+	mmap_len = calc_data_size(page_sz, arr->elt_sz, arr->len);
+
+	/* does this area exist? */
+	rte_spinlock_lock(&mem_area_lock);
+
+	TAILQ_FOREACH(tmp, &mem_area_tailq, next) {
+		if (tmp->addr == arr->data && tmp->len == mmap_len)
+			break;
+	}
+	if (tmp == NULL) {
+		rte_errno = ENOENT;
+		ret = -1;
+		goto out;
+	}
+	/* with no shconf, there were never any files to begin with */
+	if (!internal_conf->no_shconf) {
+		/*
+		 * attempt to get an exclusive lock on the file, to ensure it
+		 * has been detached by all other processes
+		 */
+		fd = tmp->fd;
+		if (eal_file_lock(fd, EAL_FLOCK_EXCLUSIVE, EAL_FLOCK_RETURN)) {
+			RTE_LOG(DEBUG, EAL, "Cannot destroy fbarray - another process is using it\n");
+			rte_errno = EBUSY;
+			ret = -1;
+			goto out;
+		}
+
+		/* we're OK to destroy the file */
+		eal_get_fbarray_path(path, sizeof(path), arr->name);
+		if (unlink(path)) {
+			RTE_LOG(DEBUG, EAL, "Cannot unlink fbarray: %s\n",
+				strerror(errno));
+			rte_errno = errno;
+			/*
+			 * we're still holding an exclusive lock, so drop it to
+			 * shared.
+			 */
+			eal_file_lock(fd, EAL_FLOCK_SHARED, EAL_FLOCK_RETURN);
+
+			ret = -1;
+			goto out;
+		}
+		close(fd);
+	}
+	rte_mem_unmap(arr->data, mmap_len);
+
+	/* area is unmapped, remove the tailq entry */
+	TAILQ_REMOVE(&mem_area_tailq, tmp, next);
+	free(tmp);
+	ret = 0;
+
+	/* reset the fbarray structure */
+	memset(arr, 0, sizeof(*arr));
+out:
+	rte_spinlock_unlock(&mem_area_lock);
+	return ret;
+}
+
+void *
 rte_fbarray_get(const struct rte_fbarray *arr, unsigned int idx)
 {
 	void *ret = NULL;
@@ -925,19 +1076,19 @@ rte_fbarray_get(const struct rte_fbarray *arr, unsigned int idx)
 	return ret;
 }
 
-int __rte_experimental
+int
 rte_fbarray_set_used(struct rte_fbarray *arr, unsigned int idx)
 {
 	return set_used(arr, idx, true);
 }
 
-int __rte_experimental
+int
 rte_fbarray_set_free(struct rte_fbarray *arr, unsigned int idx)
 {
 	return set_used(arr, idx, false);
 }
 
-int __rte_experimental
+int
 rte_fbarray_is_used(struct rte_fbarray *arr, unsigned int idx)
 {
 	struct used_mask *msk;
@@ -1006,25 +1157,25 @@ out:
 	return ret;
 }
 
-int __rte_experimental
+int
 rte_fbarray_find_next_free(struct rte_fbarray *arr, unsigned int start)
 {
 	return fbarray_find(arr, start, true, false);
 }
 
-int __rte_experimental
+int
 rte_fbarray_find_next_used(struct rte_fbarray *arr, unsigned int start)
 {
 	return fbarray_find(arr, start, true, true);
 }
 
-int __rte_experimental
+int
 rte_fbarray_find_prev_free(struct rte_fbarray *arr, unsigned int start)
 {
 	return fbarray_find(arr, start, false, false);
 }
 
-int __rte_experimental
+int
 rte_fbarray_find_prev_used(struct rte_fbarray *arr, unsigned int start)
 {
 	return fbarray_find(arr, start, false, true);
@@ -1082,28 +1233,28 @@ out:
 	return ret;
 }
 
-int __rte_experimental
+int
 rte_fbarray_find_next_n_free(struct rte_fbarray *arr, unsigned int start,
 		unsigned int n)
 {
 	return fbarray_find_n(arr, start, n, true, false);
 }
 
-int __rte_experimental
+int
 rte_fbarray_find_next_n_used(struct rte_fbarray *arr, unsigned int start,
 		unsigned int n)
 {
 	return fbarray_find_n(arr, start, n, true, true);
 }
 
-int __rte_experimental
+int
 rte_fbarray_find_prev_n_free(struct rte_fbarray *arr, unsigned int start,
 		unsigned int n)
 {
 	return fbarray_find_n(arr, start, n, false, false);
 }
 
-int __rte_experimental
+int
 rte_fbarray_find_prev_n_used(struct rte_fbarray *arr, unsigned int start,
 		unsigned int n)
 {
@@ -1162,31 +1313,140 @@ out:
 	return ret;
 }
 
-int __rte_experimental
+static int
+fbarray_find_biggest(struct rte_fbarray *arr, unsigned int start, bool used,
+		bool rev)
+{
+	int cur_idx, next_idx, cur_len, biggest_idx, biggest_len;
+	/* don't stack if conditions, use function pointers instead */
+	int (*find_func)(struct rte_fbarray *, unsigned int);
+	int (*find_contig_func)(struct rte_fbarray *, unsigned int);
+
+	if (arr == NULL || start >= arr->len) {
+		rte_errno = EINVAL;
+		return -1;
+	}
+	/* the other API calls already do their fair share of cheap checks, so
+	 * no need to do them here.
+	 */
+
+	/* the API's called are thread-safe, but something may still happen
+	 * between the API calls, so lock the fbarray. all other API's are
+	 * read-locking the fbarray, so read lock here is OK.
+	 */
+	rte_rwlock_read_lock(&arr->rwlock);
+
+	/* pick out appropriate functions */
+	if (used) {
+		if (rev) {
+			find_func = rte_fbarray_find_prev_used;
+			find_contig_func = rte_fbarray_find_rev_contig_used;
+		} else {
+			find_func = rte_fbarray_find_next_used;
+			find_contig_func = rte_fbarray_find_contig_used;
+		}
+	} else {
+		if (rev) {
+			find_func = rte_fbarray_find_prev_free;
+			find_contig_func = rte_fbarray_find_rev_contig_free;
+		} else {
+			find_func = rte_fbarray_find_next_free;
+			find_contig_func = rte_fbarray_find_contig_free;
+		}
+	}
+
+	cur_idx = start;
+	biggest_idx = -1; /* default is error */
+	biggest_len = 0;
+	for (;;) {
+		cur_idx = find_func(arr, cur_idx);
+
+		/* block found, check its length */
+		if (cur_idx >= 0) {
+			cur_len = find_contig_func(arr, cur_idx);
+			/* decide where we go next */
+			next_idx = rev ? cur_idx - cur_len : cur_idx + cur_len;
+			/* move current index to start of chunk */
+			cur_idx = rev ? next_idx + 1 : cur_idx;
+
+			if (cur_len > biggest_len) {
+				biggest_idx = cur_idx;
+				biggest_len = cur_len;
+			}
+			cur_idx = next_idx;
+			/* in reverse mode, next_idx may be -1 if chunk started
+			 * at array beginning. this means there's no more work
+			 * to do.
+			 */
+			if (cur_idx < 0)
+				break;
+		} else {
+			/* nothing more to find, stop. however, a failed API
+			 * call has set rte_errno, which we want to ignore, as
+			 * reaching the end of fbarray is not an error.
+			 */
+			rte_errno = 0;
+			break;
+		}
+	}
+	/* if we didn't find anything at all, set rte_errno */
+	if (biggest_idx < 0)
+		rte_errno = used ? ENOENT : ENOSPC;
+
+	rte_rwlock_read_unlock(&arr->rwlock);
+	return biggest_idx;
+}
+
+int
+rte_fbarray_find_biggest_free(struct rte_fbarray *arr, unsigned int start)
+{
+	return fbarray_find_biggest(arr, start, false, false);
+}
+
+int
+rte_fbarray_find_biggest_used(struct rte_fbarray *arr, unsigned int start)
+{
+	return fbarray_find_biggest(arr, start, true, false);
+}
+
+int
+rte_fbarray_find_rev_biggest_free(struct rte_fbarray *arr, unsigned int start)
+{
+	return fbarray_find_biggest(arr, start, false, true);
+}
+
+int
+rte_fbarray_find_rev_biggest_used(struct rte_fbarray *arr, unsigned int start)
+{
+	return fbarray_find_biggest(arr, start, true, true);
+}
+
+
+int
 rte_fbarray_find_contig_free(struct rte_fbarray *arr, unsigned int start)
 {
 	return fbarray_find_contig(arr, start, true, false);
 }
 
-int __rte_experimental
+int
 rte_fbarray_find_contig_used(struct rte_fbarray *arr, unsigned int start)
 {
 	return fbarray_find_contig(arr, start, true, true);
 }
 
-int __rte_experimental
+int
 rte_fbarray_find_rev_contig_free(struct rte_fbarray *arr, unsigned int start)
 {
 	return fbarray_find_contig(arr, start, false, false);
 }
 
-int __rte_experimental
+int
 rte_fbarray_find_rev_contig_used(struct rte_fbarray *arr, unsigned int start)
 {
 	return fbarray_find_contig(arr, start, false, true);
 }
 
-int __rte_experimental
+int
 rte_fbarray_find_idx(const struct rte_fbarray *arr, const void *elt)
 {
 	void *end;
@@ -1212,7 +1472,7 @@ rte_fbarray_find_idx(const struct rte_fbarray *arr, const void *elt)
 	return ret;
 }
 
-void __rte_experimental
+void
 rte_fbarray_dump_metadata(struct rte_fbarray *arr, FILE *f)
 {
 	struct used_mask *msk;

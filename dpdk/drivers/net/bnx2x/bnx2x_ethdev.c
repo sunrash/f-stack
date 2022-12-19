@@ -8,17 +8,16 @@
 #include "bnx2x.h"
 #include "bnx2x_rxtx.h"
 
+#include <rte_string_fns.h>
 #include <rte_dev.h>
 #include <rte_ethdev_pci.h>
 #include <rte_alarm.h>
-
-int bnx2x_logtype_init;
-int bnx2x_logtype_driver;
 
 /*
  * The set of PCI devices this driver supports
  */
 #define BROADCOM_PCI_VENDOR_ID 0x14E4
+#define QLOGIC_PCI_VENDOR_ID 0x1077
 static const struct rte_pci_id pci_id_bnx2x_map[] = {
 	{ RTE_PCI_DEVICE(BROADCOM_PCI_VENDOR_ID, CHIP_NUM_57800) },
 	{ RTE_PCI_DEVICE(BROADCOM_PCI_VENDOR_ID, CHIP_NUM_57711) },
@@ -26,11 +25,13 @@ static const struct rte_pci_id pci_id_bnx2x_map[] = {
 	{ RTE_PCI_DEVICE(BROADCOM_PCI_VENDOR_ID, CHIP_NUM_57811) },
 	{ RTE_PCI_DEVICE(BROADCOM_PCI_VENDOR_ID, CHIP_NUM_57840_OBS) },
 	{ RTE_PCI_DEVICE(BROADCOM_PCI_VENDOR_ID, CHIP_NUM_57840_4_10) },
+	{ RTE_PCI_DEVICE(QLOGIC_PCI_VENDOR_ID, CHIP_NUM_57840_4_10) },
 	{ RTE_PCI_DEVICE(BROADCOM_PCI_VENDOR_ID, CHIP_NUM_57840_2_20) },
 #ifdef RTE_LIBRTE_BNX2X_MF_SUPPORT
 	{ RTE_PCI_DEVICE(BROADCOM_PCI_VENDOR_ID, CHIP_NUM_57810_MF) },
 	{ RTE_PCI_DEVICE(BROADCOM_PCI_VENDOR_ID, CHIP_NUM_57811_MF) },
 	{ RTE_PCI_DEVICE(BROADCOM_PCI_VENDOR_ID, CHIP_NUM_57840_MF) },
+	{ RTE_PCI_DEVICE(QLOGIC_PCI_VENDOR_ID, CHIP_NUM_57840_MF) },
 #endif
 	{ .vendor_id = 0, }
 };
@@ -40,6 +41,7 @@ static const struct rte_pci_id pci_id_bnx2xvf_map[] = {
 	{ RTE_PCI_DEVICE(BROADCOM_PCI_VENDOR_ID, CHIP_NUM_57810_VF) },
 	{ RTE_PCI_DEVICE(BROADCOM_PCI_VENDOR_ID, CHIP_NUM_57811_VF) },
 	{ RTE_PCI_DEVICE(BROADCOM_PCI_VENDOR_ID, CHIP_NUM_57840_VF) },
+	{ RTE_PCI_DEVICE(QLOGIC_PCI_VENDOR_ID, CHIP_NUM_57840_VF) },
 	{ .vendor_id = 0, }
 };
 
@@ -132,7 +134,7 @@ bnx2x_interrupt_handler(void *param)
 	PMD_DEBUG_PERIODIC_LOG(INFO, sc, "Interrupt handled");
 
 	bnx2x_interrupt_action(dev, 1);
-	rte_intr_enable(&sc->pci_dev->intr_handle);
+	rte_intr_ack(&sc->pci_dev->intr_handle);
 }
 
 static void bnx2x_periodic_start(void *param)
@@ -239,6 +241,9 @@ bnx2x_dev_start(struct rte_eth_dev *dev)
 			PMD_DRV_LOG(ERR, sc, "rte_intr_enable failed");
 	}
 
+	/* Configure the previously stored Multicast address list */
+	if (IS_VF(sc))
+		bnx2x_vfpf_set_mcast(sc, sc->mc_addrs, sc->mc_addrs_num);
 	bnx2x_dev_rxtx_init(dev);
 
 	bnx2x_print_device_info(sc);
@@ -246,7 +251,7 @@ bnx2x_dev_start(struct rte_eth_dev *dev)
 	return ret;
 }
 
-static void
+static int
 bnx2x_dev_stop(struct rte_eth_dev *dev)
 {
 	struct bnx2x_softc *sc = dev->data->dev_private;
@@ -264,22 +269,31 @@ bnx2x_dev_stop(struct rte_eth_dev *dev)
 		/* stop the periodic callout */
 		bnx2x_periodic_stop(dev);
 	}
-
+	/* Remove the configured Multicast list
+	 * Sending NULL for the list of address and the
+	 * Number is set to 0 denoting DEL_CMD
+	 */
+	if (IS_VF(sc))
+		bnx2x_vfpf_set_mcast(sc, NULL, 0);
 	ret = bnx2x_nic_unload(sc, UNLOAD_NORMAL, FALSE);
 	if (ret) {
 		PMD_DRV_LOG(DEBUG, sc, "bnx2x_nic_unload failed (%d)", ret);
-		return;
+		return ret;
 	}
 
-	return;
+	return 0;
 }
 
-static void
+static int
 bnx2x_dev_close(struct rte_eth_dev *dev)
 {
 	struct bnx2x_softc *sc = dev->data->dev_private;
 
 	PMD_INIT_FUNC_TRACE(sc);
+
+	/* only close in case of the primary process */
+	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
+		return 0;
 
 	if (IS_VF(sc))
 		bnx2x_vf_close(sc);
@@ -289,9 +303,14 @@ bnx2x_dev_close(struct rte_eth_dev *dev)
 
 	/* free ilt */
 	bnx2x_free_ilt_mem(sc);
+
+	/* mac_addrs must not be freed alone because part of dev_private */
+	dev->data->mac_addrs = NULL;
+
+	return 0;
 }
 
-static void
+static int
 bnx2x_promisc_enable(struct rte_eth_dev *dev)
 {
 	struct bnx2x_softc *sc = dev->data->dev_private;
@@ -301,9 +320,11 @@ bnx2x_promisc_enable(struct rte_eth_dev *dev)
 	if (rte_eth_allmulticast_get(dev->data->port_id) == 1)
 		sc->rx_mode = BNX2X_RX_MODE_ALLMULTI_PROMISC;
 	bnx2x_set_rx_mode(sc);
+
+	return 0;
 }
 
-static void
+static int
 bnx2x_promisc_disable(struct rte_eth_dev *dev)
 {
 	struct bnx2x_softc *sc = dev->data->dev_private;
@@ -313,9 +334,11 @@ bnx2x_promisc_disable(struct rte_eth_dev *dev)
 	if (rte_eth_allmulticast_get(dev->data->port_id) == 1)
 		sc->rx_mode = BNX2X_RX_MODE_ALLMULTI;
 	bnx2x_set_rx_mode(sc);
+
+	return 0;
 }
 
-static void
+static int
 bnx2x_dev_allmulticast_enable(struct rte_eth_dev *dev)
 {
 	struct bnx2x_softc *sc = dev->data->dev_private;
@@ -325,9 +348,11 @@ bnx2x_dev_allmulticast_enable(struct rte_eth_dev *dev)
 	if (rte_eth_promiscuous_get(dev->data->port_id) == 1)
 		sc->rx_mode = BNX2X_RX_MODE_ALLMULTI_PROMISC;
 	bnx2x_set_rx_mode(sc);
+
+	return 0;
 }
 
-static void
+static int
 bnx2x_dev_allmulticast_disable(struct rte_eth_dev *dev)
 {
 	struct bnx2x_softc *sc = dev->data->dev_private;
@@ -337,6 +362,32 @@ bnx2x_dev_allmulticast_disable(struct rte_eth_dev *dev)
 	if (rte_eth_promiscuous_get(dev->data->port_id) == 1)
 		sc->rx_mode = BNX2X_RX_MODE_PROMISC;
 	bnx2x_set_rx_mode(sc);
+
+	return 0;
+}
+
+static int
+bnx2x_dev_set_mc_addr_list(struct rte_eth_dev *dev,
+		struct rte_ether_addr *mc_addrs, uint32_t mc_addrs_num)
+{
+	struct bnx2x_softc *sc = dev->data->dev_private;
+	int err;
+	PMD_INIT_FUNC_TRACE(sc);
+	/* flush previous addresses */
+	err = bnx2x_vfpf_set_mcast(sc, NULL, 0);
+	if (err)
+		return err;
+	sc->mc_addrs_num = 0;
+
+	/* Add new ones */
+	err = bnx2x_vfpf_set_mcast(sc, mc_addrs, mc_addrs_num);
+	if (err)
+		return err;
+
+	sc->mc_addrs_num = mc_addrs_num;
+	memcpy(sc->mc_addrs, mc_addrs, mc_addrs_num * sizeof(*mc_addrs));
+
+	return 0;
 }
 
 static int
@@ -440,10 +491,9 @@ bnx2x_get_xstats_names(__rte_unused struct rte_eth_dev *dev,
 
 	if (xstats_names != NULL)
 		for (i = 0; i < stat_cnt; i++)
-			snprintf(xstats_names[i].name,
-				sizeof(xstats_names[i].name),
-				"%s",
-				bnx2x_xstats_strings[i].name);
+			strlcpy(xstats_names[i].name,
+				bnx2x_xstats_strings[i].name,
+				sizeof(xstats_names[i].name));
 
 	return stat_cnt;
 }
@@ -478,7 +528,7 @@ bnx2x_dev_xstats_get(struct rte_eth_dev *dev, struct rte_eth_xstat *xstats,
 	return num;
 }
 
-static void
+static int
 bnx2x_dev_infos_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
 {
 	struct bnx2x_softc *sc = dev->data->dev_private;
@@ -493,11 +543,14 @@ bnx2x_dev_infos_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
 
 	dev_info->rx_desc_lim.nb_max = MAX_RX_AVAIL;
 	dev_info->rx_desc_lim.nb_min = MIN_RX_SIZE_NONTPA;
+	dev_info->rx_desc_lim.nb_mtu_seg_max = 1;
 	dev_info->tx_desc_lim.nb_max = MAX_TX_AVAIL;
+
+	return 0;
 }
 
 static int
-bnx2x_mac_addr_add(struct rte_eth_dev *dev, struct ether_addr *mac_addr,
+bnx2x_mac_addr_add(struct rte_eth_dev *dev, struct rte_ether_addr *mac_addr,
 		uint32_t index, uint32_t pool)
 {
 	struct bnx2x_softc *sc = dev->data->dev_private;
@@ -552,6 +605,7 @@ static const struct eth_dev_ops bnx2xvf_eth_dev_ops = {
 	.promiscuous_disable          = bnx2x_promisc_disable,
 	.allmulticast_enable          = bnx2x_dev_allmulticast_enable,
 	.allmulticast_disable         = bnx2x_dev_allmulticast_disable,
+	.set_mc_addr_list             = bnx2x_dev_set_mc_addr_list,
 	.link_update                  = bnx2xvf_dev_link_update,
 	.stats_get                    = bnx2x_dev_stats_get,
 	.xstats_get                   = bnx2x_dev_xstats_get,
@@ -587,6 +641,11 @@ bnx2x_common_dev_init(struct rte_eth_dev *eth_dev, int is_vf)
 	PMD_INIT_FUNC_TRACE(sc);
 
 	eth_dev->dev_ops = is_vf ? &bnx2xvf_eth_dev_ops : &bnx2x_eth_dev_ops;
+
+	if (rte_eal_process_type() != RTE_PROC_PRIMARY) {
+		PMD_DRV_LOG(ERR, sc, "Skipping device init from secondary process");
+		return 0;
+	}
 
 	rte_eth_copy_pci_info(eth_dev, pci_dev);
 
@@ -650,7 +709,8 @@ bnx2x_common_dev_init(struct rte_eth_dev *eth_dev, int is_vf)
 		}
 	}
 
-	eth_dev->data->mac_addrs = (struct ether_addr *)sc->link_params.mac_addr;
+	eth_dev->data->mac_addrs =
+		(struct rte_ether_addr *)sc->link_params.mac_addr;
 
 	if (IS_VF(sc)) {
 		rte_spinlock_init(&sc->vf2pf_lock);
@@ -706,8 +766,9 @@ eth_bnx2xvf_dev_init(struct rte_eth_dev *eth_dev)
 
 static int eth_bnx2x_dev_uninit(struct rte_eth_dev *eth_dev)
 {
-	/* mac_addrs must not be freed alone because part of dev_private */
-	eth_dev->data->mac_addrs = NULL;
+	struct bnx2x_softc *sc = eth_dev->data->dev_private;
+	PMD_INIT_FUNC_TRACE(sc);
+	bnx2x_dev_close(eth_dev);
 	return 0;
 }
 
@@ -755,13 +816,5 @@ RTE_PMD_REGISTER_KMOD_DEP(net_bnx2x, "* igb_uio | uio_pci_generic | vfio-pci");
 RTE_PMD_REGISTER_PCI(net_bnx2xvf, rte_bnx2xvf_pmd);
 RTE_PMD_REGISTER_PCI_TABLE(net_bnx2xvf, pci_id_bnx2xvf_map);
 RTE_PMD_REGISTER_KMOD_DEP(net_bnx2xvf, "* igb_uio | vfio-pci");
-
-RTE_INIT(bnx2x_init_log)
-{
-	bnx2x_logtype_init = rte_log_register("pmd.net.bnx2x.init");
-	if (bnx2x_logtype_init >= 0)
-		rte_log_set_level(bnx2x_logtype_init, RTE_LOG_NOTICE);
-	bnx2x_logtype_driver = rte_log_register("pmd.net.bnx2x.driver");
-	if (bnx2x_logtype_driver >= 0)
-		rte_log_set_level(bnx2x_logtype_driver, RTE_LOG_NOTICE);
-}
+RTE_LOG_REGISTER(bnx2x_logtype_init, pmd.net.bnx2x.init, NOTICE);
+RTE_LOG_REGISTER(bnx2x_logtype_driver, pmd.net.bnx2x.driver, NOTICE);

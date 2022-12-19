@@ -2,14 +2,13 @@
  * Copyright(c) 2017-2018 Intel Corporation
  */
 
+#include <rte_string_fns.h>
 #include <rte_malloc.h>
 #include <rte_kvargs.h>
 #include <rte_eal.h>
 
 #include "rte_compressdev_internal.h"
 #include "rte_compressdev_pmd.h"
-
-int compressdev_logtype;
 
 /**
  * Parse name from argument
@@ -21,7 +20,7 @@ rte_compressdev_pmd_parse_name_arg(const char *key __rte_unused,
 	struct rte_compressdev_pmd_init_params *params = extra_args;
 	int n;
 
-	n = snprintf(params->name, RTE_COMPRESSDEV_NAME_MAX_LEN, "%s", value);
+	n = strlcpy(params->name, value, RTE_COMPRESSDEV_NAME_MAX_LEN);
 	if (n >= RTE_COMPRESSDEV_NAME_MAX_LEN)
 		return -EINVAL;
 
@@ -47,7 +46,7 @@ rte_compressdev_pmd_parse_uint_arg(const char *key __rte_unused,
 	return 0;
 }
 
-int __rte_experimental
+int
 rte_compressdev_pmd_parse_input_args(
 		struct rte_compressdev_pmd_init_params *params,
 		const char *args)
@@ -83,7 +82,7 @@ free_kvlist:
 	return ret;
 }
 
-struct rte_compressdev * __rte_experimental
+struct rte_compressdev *
 rte_compressdev_pmd_create(const char *name,
 		struct rte_device *device,
 		size_t private_data_size,
@@ -132,7 +131,7 @@ rte_compressdev_pmd_create(const char *name,
 	return compressdev;
 }
 
-int __rte_experimental
+int
 rte_compressdev_pmd_destroy(struct rte_compressdev *compressdev)
 {
 	int retval;

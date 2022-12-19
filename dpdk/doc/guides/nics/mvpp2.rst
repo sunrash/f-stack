@@ -1,52 +1,19 @@
-..  BSD LICENSE
+..  SPDX-License-Identifier: BSD-3-Clause
     Copyright(c) 2017 Marvell International Ltd.
     Copyright(c) 2017 Semihalf.
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-      * Redistributions of source code must retain the above copyright
-        notice, this list of conditions and the following disclaimer.
-      * Redistributions in binary form must reproduce the above copyright
-        notice, this list of conditions and the following disclaimer in
-        the documentation and/or other materials provided with the
-        distribution.
-      * Neither the name of the copyright holder nor the names of its
-        contributors may be used to endorse or promote products derived
-        from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 .. _mvpp2_poll_mode_driver:
 
 MVPP2 Poll Mode Driver
 ======================
 
-The MVPP2 PMD (librte_pmd_mvpp2) provides poll mode driver support
+The MVPP2 PMD (**librte_net_mvpp2**) provides poll mode driver support
 for the Marvell PPv2 (Packet Processor v2) 1/10 Gbps adapter.
 
 Detailed information about SoCs that use PPv2 can be obtained here:
 
 * https://www.marvell.com/embedded-processors/armada-70xx/
 * https://www.marvell.com/embedded-processors/armada-80xx/
-
-.. Note::
-
-   Due to external dependencies, this driver is disabled by default. It must
-   be enabled manually by setting relevant configuration option manually.
-   Please refer to `Config File Options`_ section for further details.
 
 
 Features
@@ -141,20 +108,6 @@ Prerequisites
   DPDK environment.
 
 
-Config File Options
--------------------
-
-The following options can be modified in the ``config`` file.
-
-- ``CONFIG_RTE_LIBRTE_MVPP2_PMD`` (default ``n``)
-
-    Toggle compilation of the librte mvpp2 driver.
-
-    .. Note::
-
-       When MVPP2 PMD is enabled ``CONFIG_RTE_LIBRTE_MVNETA_PMD`` must be disabled
-
-
 Building DPDK
 -------------
 
@@ -170,22 +123,15 @@ Driver needs precompiled MUSDK library during compilation.
 MUSDK will be installed to `usr/local` under current directory.
 For the detailed build instructions please consult ``doc/musdk_get_started.txt``.
 
-Before the DPDK build process the environmental variable ``LIBMUSDK_PATH`` with
-the path to the MUSDK installation directory needs to be exported.
+The path to the MUSDK installation directory needs to set in meson, shown in the
+command below.
 
 For additional instructions regarding DPDK cross compilation please refer to :doc:`Cross compile DPDK for ARM64 <../linux_gsg/cross_build_dpdk_for_arm64>`.
 
 .. code-block:: console
 
-   export LIBMUSDK_PATH=<musdk>/usr/local
-   export CROSS=<toolchain>/bin/aarch64-linux-gnu-
-   export RTE_KERNELDIR=<kernel-dir>
-   export RTE_TARGET=arm64-armv8a-linuxapp-gcc
+   meson -Dlib_musdk_dir=/path/to/musdk build ninja -C build
 
-   make config T=arm64-armv8a-linuxapp-gcc
-   sed -i "s/MVNETA_PMD=y/MVNETA_PMD=n/" build/.config
-   sed -i "s/MVPP2_PMD=n/MVPP2_PMD=y/" build/.config
-   make
 
 Usage Example
 -------------
@@ -212,7 +158,7 @@ In order to run testpmd example application following command can be used:
 
 .. code-block:: console
 
-   ./testpmd --vdev=eth_mvpp2,iface=eth0,iface=eth2 -c 7 -- \
+   ./dpdk-testpmd --vdev=eth_mvpp2,iface=eth0,iface=eth2 -c 7 -- \
      --burst=128 --txd=2048 --rxd=1024 --rxq=2 --txq=2  --nb-cores=2 \
      -i -a --rss-udp
 
@@ -400,7 +346,7 @@ Usage example
 
 .. code-block:: console
 
-   ./testpmd --vdev=eth_mvpp2,iface=eth0,iface=eth2,cfg=/home/user/mrvl.conf \
+   ./dpdk-testpmd --vdev=eth_mvpp2,iface=eth0,iface=eth2,cfg=/home/user/mrvl.conf \
      -c 7 -- -i -a --disable-hw-vlan-strip --rxq=3 --txq=3
 
 .. _flowapi:
@@ -410,7 +356,10 @@ Flow API
 
 PPv2 offers packet classification capabilities via classifier engine which
 can be configured via generic flow API offered by DPDK.
-For an additional description please refer to DPDK :ref:`Generic flow API <Generic_flow_API>`.
+
+The :ref:`flow_isolated_mode` is supported.
+
+For an additional description please refer to DPDK :doc:`../prog_guide/rte_flow`.
 
 Supported flow actions
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -510,7 +459,7 @@ Before proceeding run testpmd user application:
 
 .. code-block:: console
 
-   ./testpmd --vdev=eth_mvpp2,iface=eth0,iface=eth2 -c 3 -- -i --p 3 -a --disable-hw-vlan-strip
+   ./dpdk-testpmd --vdev=eth_mvpp2,iface=eth0,iface=eth2 -c 3 -- -i --p 3 -a --disable-hw-vlan-strip
 
 Example #1
 ^^^^^^^^^^
@@ -602,7 +551,7 @@ Usage example
 
    .. code-block:: console
 
-		./testpmd --vdev=eth_mvpp2,iface=eth0,iface=eth2 -c 6 -- -i -p 3 -a --txd 1024 --rxd 1024
+		./dpdk-testpmd --vdev=eth_mvpp2,iface=eth0,iface=eth2 -c 6 -- -i -p 3 -a --txd 1024 --rxd 1024
 
 2. Create meter profile:
 
@@ -681,7 +630,7 @@ For a detailed usage description please refer to "Traffic Management" section in
 
    .. code-block:: console
 
-		./testpmd --vdev=net_mrvl,iface=eth0,iface=eth2,cfg=./qos_config -c 7 -- \
+		./dpdk-testpmd --vdev=net_mrvl,iface=eth0,iface=eth2,cfg=./qos_config -c 7 -- \
 		-i -p 3 --disable-hw-vlan-strip --rxq 3 --txq 3 --txd 1024 --rxd 1024
 
 2. Stop all ports:

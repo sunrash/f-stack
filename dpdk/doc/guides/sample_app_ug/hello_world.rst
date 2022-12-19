@@ -17,11 +17,11 @@ The application is located in the ``helloworld`` sub-directory.
 Running the Application
 -----------------------
 
-To run the example in a linuxapp environment:
+To run the example in a linux environment:
 
 .. code-block:: console
 
-    $ ./build/helloworld -l 0-3 -n 4
+    $ ./<build_dir>/examples/dpdk-helloworld -l 0-3 -n 4
 
 Refer to *DPDK Getting Started Guide* for general information on running applications
 and the Environment Abstraction Layer (EAL) options.
@@ -48,7 +48,7 @@ This is done in the main() function using the following code:
         if (ret < 0)
             rte_panic("Cannot init EAL\n");
 
-This call finishes the initialization process that was started before main() is called (in case of a Linuxapp environment).
+This call finishes the initialization process that was started before main() is called (in case of a Linux environment).
 The argc and argv arguments are provided to the rte_eal_init() function.
 The value returned is the number of parsed arguments.
 
@@ -62,7 +62,7 @@ The following is the definition of the function:
 .. code-block:: c
 
     static int
-    lcore_hello( attribute ((unused)) void *arg)
+    lcore_hello(__rte_unused void *arg)
     {
         unsigned lcore_id;
 
@@ -75,13 +75,13 @@ The code that launches the function on each lcore is as follows:
 
 .. code-block:: c
 
-    /* call lcore_hello() on every slave lcore */
+    /* call lcore_hello() on every worker lcore */
 
-    RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+    RTE_LCORE_FOREACH_WORKER(lcore_id) {
        rte_eal_remote_launch(lcore_hello, NULL, lcore_id);
     }
 
-    /* call it on master lcore too */
+    /* call it on main lcore too */
 
     lcore_hello(NULL);
 
@@ -89,6 +89,6 @@ The following code is equivalent and simpler:
 
 .. code-block:: c
 
-    rte_eal_mp_remote_launch(lcore_hello, NULL, CALL_MASTER);
+    rte_eal_mp_remote_launch(lcore_hello, NULL, CALL_MAIN);
 
 Refer to the *DPDK API Reference* for detailed information on the rte_eal_mp_remote_launch() function.

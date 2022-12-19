@@ -53,7 +53,7 @@ static uint16_t nb_rxd = RTE_TEST_RX_DESC_DEFAULT;
 static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
 
 /* ethernet addresses of ports */
-static struct ether_addr lsi_ports_eth_addr[RTE_MAX_ETHPORTS];
+static struct rte_ether_addr lsi_ports_eth_addr[RTE_MAX_ETHPORTS];
 
 /* mask of enabled ports */
 static uint32_t lsi_enabled_port_mask = 0;
@@ -99,9 +99,10 @@ struct lsi_port_statistics {
 struct lsi_port_statistics port_statistics[RTE_MAX_ETHPORTS];
 
 /* A tsc-based timer responsible for triggering statistics printout */
-#define TIMER_MILLISECOND 2000000ULL /* around 1ms at 2 Ghz */
+#define TIMER_MILLISECOND (rte_get_timer_hz() / 1000)
 #define MAX_TIMER_PERIOD 86400 /* 1 day max */
-static int64_t timer_period = 10 * TIMER_MILLISECOND * 1000; /* default period is 10 seconds */
+#define DEFAULT_TIMER_PERIOD 10UL /* default period is 10 seconds */
+static int64_t timer_period;
 
 /* Print out statistics on packets dropped */
 static void
@@ -117,6 +118,7 @@ print_stats(void)
 
 	const char clr[] = { 27, '[', '2', 'J', '\0' };
 	const char topLeft[] = { 27, '[', '1', ';', '1', 'H','\0' };
+	int link_get_err;
 
 		/* Clear screen and move to top left */
 	printf("%s%s", clr, topLeft);
@@ -129,17 +131,20 @@ print_stats(void)
 			continue;
 
 		memset(&link, 0, sizeof(link));
-		rte_eth_link_get_nowait(portid, &link);
+		link_get_err = rte_eth_link_get_nowait(portid, &link);
 		printf("\nStatistics for port %u ------------------------------"
 			   "\nLink status: %25s"
-			   "\nLink speed: %26u"
+			   "\nLink speed: %26s"
 			   "\nLink duplex: %25s"
 			   "\nPackets sent: %24"PRIu64
 			   "\nPackets received: %20"PRIu64
 			   "\nPackets dropped: %21"PRIu64,
 			   portid,
+			   link_get_err < 0 ? "Link get failed" :
 			   (link.link_status ? "Link up" : "Link down"),
-			   (unsigned)link.link_speed,
+			   link_get_err < 0 ? "0" :
+			   rte_eth_link_speed_to_str(link.link_speed),
+			   link_get_err < 0 ? "Link get failed" :
 			   (link.link_duplex == ETH_LINK_FULL_DUPLEX ? \
 					"full-duplex" : "half-duplex"),
 			   port_statistics[portid].tx,
@@ -158,25 +163,27 @@ print_stats(void)
 		   total_packets_rx,
 		   total_packets_dropped);
 	printf("\n====================================================\n");
+
+	fflush(stdout);
 }
 
 static void
 lsi_simple_forward(struct rte_mbuf *m, unsigned portid)
 {
-	struct ether_hdr *eth;
+	struct rte_ether_hdr *eth;
 	void *tmp;
 	unsigned dst_port = lsi_dst_ports[portid];
 	int sent;
 	struct rte_eth_dev_tx_buffer *buffer;
 
-	eth = rte_pktmbuf_mtod(m, struct ether_hdr *);
+	eth = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
 	/* 02:00:00:00:00:xx */
 	tmp = &eth->d_addr.addr_bytes[0];
 	*((uint64_t *)tmp) = 0x000000000002 + ((uint64_t)dst_port << 40);
 
 	/* src addr */
-	ether_addr_copy(&lsi_ports_eth_addr[dst_port], &eth->s_addr);
+	rte_ether_addr_copy(&lsi_ports_eth_addr[dst_port], &eth->s_addr);
 
 	buffer = tx_buffer[dst_port];
 	sent = rte_eth_tx_buffer(dst_port, 0, buffer, m);
@@ -249,8 +256,8 @@ lsi_main_loop(void)
 				/* if timer has reached its timeout */
 				if (unlikely(timer_tsc >= (uint64_t) timer_period)) {
 
-					/* do this only on master core */
-					if (lcore_id == rte_get_master_lcore()) {
+					/* do this only on main core */
+					if (lcore_id == rte_get_main_lcore()) {
 						print_stats();
 						/* reset the timer */
 						timer_tsc = 0;
@@ -282,7 +289,7 @@ lsi_main_loop(void)
 }
 
 static int
-lsi_launch_one_lcore(__attribute__((unused)) void *dummy)
+lsi_launch_one_lcore(__rte_unused void *dummy)
 {
 	lsi_main_loop();
 	return 0;
@@ -308,10 +315,7 @@ lsi_parse_portmask(const char *portmask)
 	/* parse hexadecimal string */
 	pm = strtoul(portmask, &end, 16);
 	if ((portmask[0] == '\0') || (end == NULL) || (*end != '\0'))
-		return -1;
-
-	if (pm == 0)
-		return -1;
+		return 0;
 
 	return pm;
 }
@@ -361,6 +365,8 @@ lsi_parse_args(int argc, char **argv)
 	static struct option lgopts[] = {
 		{NULL, 0, 0, 0}
 	};
+
+	timer_period = DEFAULT_TIMER_PERIOD * TIMER_MILLISECOND * 1000;
 
 	argvopt = argv;
 
@@ -438,20 +444,22 @@ lsi_event_callback(uint16_t port_id, enum rte_eth_event_type type, void *param,
 		    void *ret_param)
 {
 	struct rte_eth_link link;
+	int ret;
+	char link_status_text[RTE_ETH_LINK_MAX_STR_LEN];
 
 	RTE_SET_USED(param);
 	RTE_SET_USED(ret_param);
 
 	printf("\n\nIn registered callback...\n");
 	printf("Event type: %s\n", type == RTE_ETH_EVENT_INTR_LSC ? "LSC interrupt" : "unknown event");
-	rte_eth_link_get_nowait(port_id, &link);
-	if (link.link_status) {
-		printf("Port %d Link Up - speed %u Mbps - %s\n\n",
-				port_id, (unsigned)link.link_speed,
-			(link.link_duplex == ETH_LINK_FULL_DUPLEX) ?
-				("full-duplex") : ("half-duplex"));
-	} else
-		printf("Port %d Link Down\n\n", port_id);
+	ret = rte_eth_link_get_nowait(port_id, &link);
+	if (ret < 0) {
+		printf("Failed link get on port %d: %s\n",
+		       port_id, rte_strerror(-ret));
+		return ret;
+	}
+	rte_eth_link_to_str(link_status_text, sizeof(link_status_text), &link);
+	printf("Port %d %s\n\n", port_id, link_status_text);
 
 	return 0;
 }
@@ -465,6 +473,8 @@ check_all_ports_link_status(uint16_t port_num, uint32_t port_mask)
 	uint8_t count, all_ports_up, print_flag = 0;
 	uint16_t portid;
 	struct rte_eth_link link;
+	int ret;
+	char link_status_text[RTE_ETH_LINK_MAX_STR_LEN];
 
 	printf("\nChecking link status");
 	fflush(stdout);
@@ -474,17 +484,20 @@ check_all_ports_link_status(uint16_t port_num, uint32_t port_mask)
 			if ((port_mask & (1 << portid)) == 0)
 				continue;
 			memset(&link, 0, sizeof(link));
-			rte_eth_link_get_nowait(portid, &link);
+			ret = rte_eth_link_get_nowait(portid, &link);
+			if (ret < 0) {
+				all_ports_up = 0;
+				if (print_flag == 1)
+					printf("Port %u link get failed: %s\n",
+						portid, rte_strerror(-ret));
+				continue;
+			}
 			/* print link status if flag set */
 			if (print_flag == 1) {
-				if (link.link_status)
-					printf(
-					"Port%d Link Up. Speed %u Mbps - %s\n",
-						portid, link.link_speed,
-				(link.link_duplex == ETH_LINK_FULL_DUPLEX) ?
-					("full-duplex") : ("half-duplex\n"));
-				else
-					printf("Port %d Link Down\n", portid);
+				rte_eth_link_to_str(link_status_text,
+					sizeof(link_status_text), &link);
+				printf("Port %d %s", portid,
+				       link_status_text);
 				continue;
 			}
 			/* clear all_ports_up flag if any link down */
@@ -609,7 +622,13 @@ main(int argc, char **argv)
 		/* init port */
 		printf("Initializing port %u... ", (unsigned) portid);
 		fflush(stdout);
-		rte_eth_dev_info_get(portid, &dev_info);
+
+		ret = rte_eth_dev_info_get(portid, &dev_info);
+		if (ret != 0)
+			rte_exit(EXIT_FAILURE,
+				"Error during getting device (port %u) info: %s\n",
+				portid, strerror(-ret));
+
 		if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
 			local_port_conf.txmode.offloads |=
 				DEV_TX_OFFLOAD_MBUF_FAST_FREE;
@@ -633,8 +652,12 @@ main(int argc, char **argv)
 		rte_eth_dev_callback_register(portid,
 			RTE_ETH_EVENT_INTR_LSC, lsi_event_callback, NULL);
 
-		rte_eth_macaddr_get(portid,
+		ret = rte_eth_macaddr_get(portid,
 				    &lsi_ports_eth_addr[portid]);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE,
+				 "rte_eth_macaddr_get: err=%d, port=%u\n",
+				 ret, (unsigned int)portid);
 
 		/* init one RX queue */
 		fflush(stdout);
@@ -683,7 +706,11 @@ main(int argc, char **argv)
 				  ret, (unsigned) portid);
 		printf("done:\n");
 
-		rte_eth_promiscuous_enable(portid);
+		ret = rte_eth_promiscuous_enable(portid);
+		if (ret != 0)
+			rte_exit(EXIT_FAILURE,
+				"rte_eth_promiscuous_enable: err=%s, port=%u\n",
+				rte_strerror(-ret), portid);
 
 		printf("Port %u, MAC address: %02X:%02X:%02X:%02X:%02X:%02X\n\n",
 				(unsigned) portid,
@@ -701,11 +728,14 @@ main(int argc, char **argv)
 	check_all_ports_link_status(nb_ports, lsi_enabled_port_mask);
 
 	/* launch per-lcore init on every lcore */
-	rte_eal_mp_remote_launch(lsi_launch_one_lcore, NULL, CALL_MASTER);
-	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+	rte_eal_mp_remote_launch(lsi_launch_one_lcore, NULL, CALL_MAIN);
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
 		if (rte_eal_wait_lcore(lcore_id) < 0)
 			return -1;
 	}
+
+	/* clean up the EAL */
+	rte_eal_cleanup();
 
 	return 0;
 }

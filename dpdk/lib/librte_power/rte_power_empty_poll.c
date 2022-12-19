@@ -52,13 +52,13 @@ set_power_freq(int lcore_id, enum freq_val freq, bool specific_freq)
 }
 
 
-static inline void __attribute__((always_inline))
+static __rte_always_inline void
 exit_training_state(struct priority_worker *poll_stats)
 {
 	RTE_SET_USED(poll_stats);
 }
 
-static inline void __attribute__((always_inline))
+static __rte_always_inline void
 enter_training_state(struct priority_worker *poll_stats)
 {
 	poll_stats->iter_counter = 0;
@@ -66,7 +66,7 @@ enter_training_state(struct priority_worker *poll_stats)
 	poll_stats->queue_state = TRAINING;
 }
 
-static inline void __attribute__((always_inline))
+static __rte_always_inline void
 enter_normal_state(struct priority_worker *poll_stats)
 {
 	/* Clear the averages arrays and strs */
@@ -86,7 +86,7 @@ enter_normal_state(struct priority_worker *poll_stats)
 	poll_stats->thresh[HGH].threshold_percent = high_to_med_threshold;
 }
 
-static inline void __attribute__((always_inline))
+static __rte_always_inline void
 enter_busy_state(struct priority_worker *poll_stats)
 {
 	memset(poll_stats->edpi_av, 0, sizeof(poll_stats->edpi_av));
@@ -101,14 +101,14 @@ enter_busy_state(struct priority_worker *poll_stats)
 	set_power_freq(poll_stats->lcore_id, HGH, false);
 }
 
-static inline void __attribute__((always_inline))
+static __rte_always_inline void
 enter_purge_state(struct priority_worker *poll_stats)
 {
 	poll_stats->iter_counter = 0;
 	poll_stats->queue_state = LOW_PURGE;
 }
 
-static inline void __attribute__((always_inline))
+static __rte_always_inline void
 set_state(struct priority_worker *poll_stats,
 		enum queue_state new_state)
 {
@@ -131,7 +131,7 @@ set_state(struct priority_worker *poll_stats,
 	}
 }
 
-static inline void __attribute__((always_inline))
+static __rte_always_inline void
 set_policy(struct priority_worker *poll_stats,
 		struct ep_policy *policy)
 {
@@ -204,10 +204,10 @@ update_training_stats(struct priority_worker *poll_stats,
 	}
 }
 
-static inline uint32_t __attribute__((always_inline))
+static __rte_always_inline uint32_t
 update_stats(struct priority_worker *poll_stats)
 {
-	uint64_t tot_edpi = 0, tot_ppi = 0;
+	uint64_t tot_edpi = 0;
 	uint32_t j, percent;
 
 	struct priority_worker *s = poll_stats;
@@ -237,7 +237,6 @@ update_stats(struct priority_worker *poll_stats)
 
 	for (j = 0; j < BINS_AV; j++) {
 		tot_edpi += s->edpi_av[j];
-		tot_ppi += s->ppi_av[j];
 	}
 
 	tot_edpi = tot_edpi / BINS_AV;
@@ -249,7 +248,7 @@ update_stats(struct priority_worker *poll_stats)
 }
 
 
-static inline void  __attribute__((always_inline))
+static __rte_always_inline void
 update_stats_normal(struct priority_worker *poll_stats)
 {
 	uint32_t percent;
@@ -361,7 +360,7 @@ empty_poll_training(struct priority_worker *poll_stats,
 	return 0;
 }
 
-void __rte_experimental
+void
 rte_empty_poll_detection(struct rte_timer *tim, void *arg)
 {
 
@@ -402,7 +401,7 @@ rte_empty_poll_detection(struct rte_timer *tim, void *arg)
 
 }
 
-int __rte_experimental
+int
 rte_power_empty_poll_stat_init(struct ep_params **eptr, uint8_t *freq_tlb,
 		struct ep_policy *policy)
 {
@@ -452,7 +451,7 @@ rte_power_empty_poll_stat_init(struct ep_params **eptr, uint8_t *freq_tlb,
 		if (get_freq_index(LOW) > total_avail_freqs[i])
 			return -1;
 
-		if (rte_get_master_lcore() != i) {
+		if (rte_get_main_lcore() != i) {
 			w->wrk_stats[i].lcore_id = i;
 			set_policy(&w->wrk_stats[i], policy);
 		}
@@ -461,7 +460,7 @@ rte_power_empty_poll_stat_init(struct ep_params **eptr, uint8_t *freq_tlb,
 	return 0;
 }
 
-void __rte_experimental
+void
 rte_power_empty_poll_stat_free(void)
 {
 
@@ -471,7 +470,7 @@ rte_power_empty_poll_stat_free(void)
 		rte_free(ep_params);
 }
 
-int __rte_experimental
+int
 rte_power_empty_poll_stat_update(unsigned int lcore_id)
 {
 	struct priority_worker *poll_stats;
@@ -489,7 +488,7 @@ rte_power_empty_poll_stat_update(unsigned int lcore_id)
 	return 0;
 }
 
-int __rte_experimental
+int
 rte_power_poll_stat_update(unsigned int lcore_id, uint8_t nb_pkt)
 {
 
@@ -509,7 +508,7 @@ rte_power_poll_stat_update(unsigned int lcore_id, uint8_t nb_pkt)
 }
 
 
-uint64_t __rte_experimental
+uint64_t
 rte_power_empty_poll_stat_fetch(unsigned int lcore_id)
 {
 	struct priority_worker *poll_stats;
@@ -525,7 +524,7 @@ rte_power_empty_poll_stat_fetch(unsigned int lcore_id)
 	return poll_stats->empty_dequeues;
 }
 
-uint64_t __rte_experimental
+uint64_t
 rte_power_poll_stat_fetch(unsigned int lcore_id)
 {
 	struct priority_worker *poll_stats;

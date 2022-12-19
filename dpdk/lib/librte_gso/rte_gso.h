@@ -18,12 +18,12 @@ extern "C" {
 #include <rte_mbuf.h>
 
 /* Minimum GSO segment size for TCP based packets. */
-#define RTE_GSO_SEG_SIZE_MIN (sizeof(struct ether_hdr) + \
-		sizeof(struct ipv4_hdr) + sizeof(struct tcp_hdr) + 1)
+#define RTE_GSO_SEG_SIZE_MIN (sizeof(struct rte_ether_hdr) + \
+		sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_tcp_hdr) + 1)
 
 /* Minimum GSO segment size for UDP based packets. */
-#define RTE_GSO_UDP_SEG_SIZE_MIN (sizeof(struct ether_hdr) + \
-		sizeof(struct ipv4_hdr) + sizeof(struct udp_hdr) + 1)
+#define RTE_GSO_UDP_SEG_SIZE_MIN (sizeof(struct rte_ether_hdr) + \
+		sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) + 1)
 
 /* GSO flags for rte_gso_ctx. */
 #define RTE_GSO_FLAG_IPID_FIXED (1ULL << 0)
@@ -89,8 +89,11 @@ struct rte_gso_ctx {
  * the GSO segments are sent to should support transmission of multi-segment
  * packets.
  *
- * If the input packet is GSO'd, its mbuf refcnt reduces by 1. Therefore,
- * when all GSO segments are freed, the input packet is freed automatically.
+ * If the input packet is GSO'd, all the indirect segments are attached to the
+ * input packet.
+ *
+ * rte_gso_segment() will not free the input packet no matter whether it is
+ * GSO'd or not, the application should free it after calling rte_gso_segment().
  *
  * If the memory space in pkts_out or MBUF pools is insufficient, this
  * function fails, and it returns (-1) * errno. Otherwise, GSO succeeds,
@@ -109,6 +112,7 @@ struct rte_gso_ctx {
  *
  * @return
  *  - The number of GSO segments filled in pkts_out on success.
+ *  - Return 0 if it does not need to be GSO'd.
  *  - Return -ENOMEM if run out of memory in MBUF pools.
  *  - Return -EINVAL for invalid parameters.
  */

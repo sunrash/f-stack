@@ -2,6 +2,7 @@
  * Copyright(c) 2017 Intel Corporation
  */
 
+#include <rte_string_fns.h>
 #include <rte_malloc.h>
 
 #include "rte_cryptodev_pmd.h"
@@ -16,7 +17,7 @@ rte_cryptodev_pmd_parse_name_arg(const char *key __rte_unused,
 	struct rte_cryptodev_pmd_init_params *params = extra_args;
 	int n;
 
-	n = snprintf(params->name, RTE_CRYPTODEV_NAME_MAX_LEN, "%s", value);
+	n = strlcpy(params->name, value, RTE_CRYPTODEV_NAME_MAX_LEN);
 	if (n >= RTE_CRYPTODEV_NAME_MAX_LEN)
 		return -EINVAL;
 
@@ -139,6 +140,7 @@ int
 rte_cryptodev_pmd_destroy(struct rte_cryptodev *cryptodev)
 {
 	int retval;
+	void *dev_priv = cryptodev->data->dev_private;
 
 	CDEV_LOG_INFO("Closing crypto device %s", cryptodev->device->name);
 
@@ -148,7 +150,7 @@ rte_cryptodev_pmd_destroy(struct rte_cryptodev *cryptodev)
 		return retval;
 
 	if (rte_eal_process_type() == RTE_PROC_PRIMARY)
-		rte_free(cryptodev->data->dev_private);
+		rte_free(dev_priv);
 
 
 	cryptodev->device = NULL;

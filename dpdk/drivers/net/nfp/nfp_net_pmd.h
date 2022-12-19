@@ -1,32 +1,6 @@
-/*
+/* SPDX-License-Identifier: BSD-3-Clause
  * Copyright (c) 2014-2018 Netronome Systems, Inc.
  * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- *  this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *  notice, this list of conditions and the following disclaimer in the
- *  documentation and/or other materials provided with the distribution
- *
- * 3. Neither the name of the copyright holder nor the names of its
- *  contributors may be used to endorse or promote products derived from this
- *  software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
  */
 
 /*
@@ -34,7 +8,7 @@
  *
  * @file dpdk/pmd/nfp_net_pmd.h
  *
- * Netronome NFP_NET PMD driver
+ * Netronome NFP_NET PMD
  */
 
 #ifndef _NFP_NET_PMD_H_
@@ -54,10 +28,16 @@ struct nfp_net_adapter;
  * DPDK uses uint16_t variables for these values
  */
 #define NFP_NET_MAX_TX_DESC (32 * 1024)
-#define NFP_NET_MIN_TX_DESC 64
+#define NFP_NET_MIN_TX_DESC 256
 
 #define NFP_NET_MAX_RX_DESC (32 * 1024)
-#define NFP_NET_MIN_RX_DESC 64
+#define NFP_NET_MIN_RX_DESC 256
+
+/* Descriptor alignment */
+#define NFP_ALIGN_RING_DESC 128
+
+#define NFP_TX_MAX_SEG     UINT8_MAX
+#define NFP_TX_MAX_MTU_SEG 8
 
 /* Bar allocation */
 #define NFP_NET_CRTL_BAR        0
@@ -208,7 +188,7 @@ struct nfp_net_tx_desc {
 				__le16 vlan; /* VLAN tag to add if indicated */
 			};
 			__le16 data_len;    /* Length of frame + meta data */
-		} __attribute__((__packed__));
+		} __rte_packed;
 		__le32 vals[4];
 	};
 };
@@ -255,6 +235,9 @@ struct nfp_net_txq {
 	 */
 	struct nfp_net_tx_desc *txds;
 
+	/* Pointer to the memzone for the ring */
+	const struct rte_memzone *tz;
+
 	/*
 	 * At this point 48 bytes have been used for all the fields in the
 	 * TX critical path. We have room for 8 bytes and still all placed
@@ -269,7 +252,7 @@ struct nfp_net_txq {
 	int qidx;
 	int tx_qcidx;
 	__le64 dma;
-} __attribute__ ((__aligned__(64)));
+} __rte_aligned(64);
 
 /* RX and freelist descriptor format */
 #define PCIE_DESC_RX_DD                 (1 << 7)
@@ -304,7 +287,7 @@ struct nfp_net_rx_desc {
 			uint8_t dd;
 
 			__le32 dma_addr_lo;
-		} __attribute__((__packed__)) fld;
+		} __rte_packed fld;
 
 		/* RX descriptor */
 		struct {
@@ -314,7 +297,7 @@ struct nfp_net_rx_desc {
 
 			__le16 flags;
 			__le16 vlan;
-		} __attribute__((__packed__)) rxd;
+		} __rte_packed rxd;
 
 		__le32 vals[2];
 	};
@@ -390,6 +373,9 @@ struct nfp_net_rxq {
 	/* DMA address of the queue */
 	__le64 dma;
 
+	/* Pointer to the memzone for the ring */
+	const struct rte_memzone *tz;
+
 	/*
 	 * Queue information: @qidx is the queue index from Linux's
 	 * perspective.  @fl_qcidx is the index of the Queue
@@ -400,7 +386,7 @@ struct nfp_net_rxq {
 	int qidx;
 	int fl_qcidx;
 	int rx_qcidx;
-} __attribute__ ((__aligned__(64)));
+} __rte_aligned(64);
 
 struct nfp_net_hw {
 	/* Info from the firmware */
@@ -436,7 +422,7 @@ struct nfp_net_hw {
 #endif
 #endif
 
-	uint8_t mac_addr[ETHER_ADDR_LEN];
+	uint8_t mac_addr[RTE_ETHER_ADDR_LEN];
 
 	/* Records starting point for counters */
 	struct rte_eth_stats eth_stats_base;
@@ -456,6 +442,7 @@ struct nfp_net_hw {
 
 	struct nfp_hwinfo *hwinfo;
 	struct nfp_rtsym_table *sym_tbl;
+	uint32_t nfp_cpp_service_id;
 };
 
 struct nfp_net_adapter {

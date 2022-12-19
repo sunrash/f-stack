@@ -14,7 +14,7 @@
 #include <rte_kvargs.h>
 #include <rte_mvep_common.h>
 
-#include "rte_mrvl_pmd_private.h"
+#include "mrvl_pmd_private.h"
 
 #define MRVL_PMD_MAX_NB_SESS_ARG		("max_nb_sessions")
 #define MRVL_PMD_DEFAULT_MAX_NB_SESSIONS	2048
@@ -67,7 +67,7 @@ __rte_aligned(32);
  * Map of supported cipher algorithms.
  */
 static const
-struct cipher_params_mapping cipher_map[RTE_CRYPTO_CIPHER_LIST_END] = {
+struct cipher_params_mapping cipher_map[] = {
 	[RTE_CRYPTO_CIPHER_NULL] = {
 		.supported = ALGO_SUPPORTED,
 		.cipher_alg = SAM_CIPHER_NONE },
@@ -107,7 +107,7 @@ struct cipher_params_mapping cipher_map[RTE_CRYPTO_CIPHER_LIST_END] = {
  * Map of supported auth algorithms.
  */
 static const
-struct auth_params_mapping auth_map[RTE_CRYPTO_AUTH_LIST_END] = {
+struct auth_params_mapping auth_map[] = {
 	[RTE_CRYPTO_AUTH_NULL] = {
 		.supported = ALGO_SUPPORTED,
 		.auth_alg = SAM_AUTH_NONE },
@@ -156,7 +156,7 @@ struct auth_params_mapping auth_map[RTE_CRYPTO_AUTH_LIST_END] = {
  * Map of supported aead algorithms.
  */
 static const
-struct cipher_params_mapping aead_map[RTE_CRYPTO_AEAD_LIST_END] = {
+struct cipher_params_mapping aead_map[] = {
 	[RTE_CRYPTO_AEAD_AES_GCM] = {
 		.supported = ALGO_SUPPORTED,
 		.cipher_alg = SAM_CIPHER_AES,
@@ -222,6 +222,8 @@ static int
 mrvl_crypto_set_cipher_session_parameters(struct mrvl_crypto_session *sess,
 		const struct rte_crypto_sym_xform *cipher_xform)
 {
+	uint8_t *cipher_key;
+
 	/* Make sure we've got proper struct */
 	if (cipher_xform->type != RTE_CRYPTO_SYM_XFORM_CIPHER) {
 		MRVL_LOG(ERR, "Wrong xform struct provided!");
@@ -256,8 +258,17 @@ mrvl_crypto_set_cipher_session_parameters(struct mrvl_crypto_session *sess,
 		return -EINVAL;
 	}
 
+	cipher_key = malloc(cipher_xform->cipher.key.length);
+	if (cipher_key == NULL) {
+		MRVL_LOG(ERR, "Insufficient memory!");
+		return -ENOMEM;
+	}
+
+	memcpy(cipher_key, cipher_xform->cipher.key.data,
+			cipher_xform->cipher.key.length);
+
 	sess->sam_sess_params.cipher_key_len = cipher_xform->cipher.key.length;
-	sess->sam_sess_params.cipher_key = cipher_xform->cipher.key.data;
+	sess->sam_sess_params.cipher_key = cipher_key;
 
 	return 0;
 }
@@ -273,6 +284,8 @@ static int
 mrvl_crypto_set_auth_session_parameters(struct mrvl_crypto_session *sess,
 		const struct rte_crypto_sym_xform *auth_xform)
 {
+	uint8_t *auth_key = NULL;
+
 	/* Make sure we've got proper struct */
 	if (auth_xform->type != RTE_CRYPTO_SYM_XFORM_AUTH) {
 		MRVL_LOG(ERR, "Wrong xform struct provided!");
@@ -293,9 +306,20 @@ mrvl_crypto_set_auth_session_parameters(struct mrvl_crypto_session *sess,
 		auth_map[auth_xform->auth.algo].auth_alg;
 	sess->sam_sess_params.u.basic.auth_icv_len =
 		auth_xform->auth.digest_length;
+
+	if (auth_xform->auth.key.length > 0) {
+		auth_key = malloc(auth_xform->auth.key.length);
+		if (auth_key == NULL) {
+			MRVL_LOG(ERR, "Not enough memory!");
+			return -EINVAL;
+		}
+
+		memcpy(auth_key, auth_xform->auth.key.data,
+				auth_xform->auth.key.length);
+	}
+
 	/* auth_key must be NULL if auth algorithm does not use HMAC */
-	sess->sam_sess_params.auth_key = auth_xform->auth.key.length ?
-					 auth_xform->auth.key.data : NULL;
+	sess->sam_sess_params.auth_key = auth_key;
 	sess->sam_sess_params.auth_key_len = auth_xform->auth.key.length;
 
 	return 0;
@@ -312,6 +336,8 @@ static int
 mrvl_crypto_set_aead_session_parameters(struct mrvl_crypto_session *sess,
 		const struct rte_crypto_sym_xform *aead_xform)
 {
+	uint8_t *aead_key;
+
 	/* Make sure we've got proper struct */
 	if (aead_xform->type != RTE_CRYPTO_SYM_XFORM_AEAD) {
 		MRVL_LOG(ERR, "Wrong xform struct provided!");
@@ -334,6 +360,14 @@ mrvl_crypto_set_aead_session_parameters(struct mrvl_crypto_session *sess,
 	sess->sam_sess_params.cipher_mode =
 		aead_map[aead_xform->aead.algo].cipher_mode;
 
+	if (sess->sam_sess_params.cipher_mode == SAM_CIPHER_GCM) {
+		/* IV must include nonce for all counter modes */
+		sess->cipher_iv_offset = aead_xform->cipher.iv.offset;
+
+		/* Set order of authentication then encryption to 0 in GCM */
+		sess->sam_sess_params.u.basic.auth_then_encrypt = 0;
+	}
+
 	/* Assume IV will be passed together with data. */
 	sess->sam_sess_params.cipher_iv = NULL;
 
@@ -344,7 +378,16 @@ mrvl_crypto_set_aead_session_parameters(struct mrvl_crypto_session *sess,
 		return -EINVAL;
 	}
 
-	sess->sam_sess_params.cipher_key = aead_xform->aead.key.data;
+	aead_key = malloc(aead_xform->aead.key.length);
+	if (aead_key == NULL) {
+		MRVL_LOG(ERR, "Insufficient memory!");
+		return -ENOMEM;
+	}
+
+	memcpy(aead_key, aead_xform->aead.key.data,
+			aead_xform->aead.key.length);
+
+	sess->sam_sess_params.cipher_key = aead_key;
 	sess->sam_sess_params.cipher_key_len = aead_xform->aead.key.length;
 
 	if (sess->sam_sess_params.cipher_mode == SAM_CIPHER_GCM)
@@ -786,7 +829,6 @@ cryptodev_mrvl_crypto_create(const char *name,
 			RTE_CRYPTODEV_FF_OOP_SGL_IN_LB_OUT |
 			RTE_CRYPTODEV_FF_OOP_LB_IN_LB_OUT;
 
-	/* Set vector instructions mode supported */
 	internals = dev->data->dev_private;
 
 	internals->max_nb_qpairs = init_params->common.max_nb_queue_pairs;
@@ -882,14 +924,14 @@ mrvl_pmd_parse_input_args(struct mrvl_pmd_init_params *params,
 		ret = rte_kvargs_process(kvlist,
 					 RTE_CRYPTODEV_PMD_NAME_ARG,
 					 &parse_name_arg,
-					 &params->common);
+					 &params->common.name);
 		if (ret < 0)
 			goto free_kvlist;
 
 		ret = rte_kvargs_process(kvlist,
 					 MRVL_PMD_MAX_NB_SESS_ARG,
 					 &parse_integer_arg,
-					 params);
+					 &params->max_nb_sessions);
 		if (ret < 0)
 			goto free_kvlist;
 
@@ -985,8 +1027,4 @@ RTE_PMD_REGISTER_PARAM_STRING(CRYPTODEV_NAME_MRVL_PMD,
 	"socket_id=<int>");
 RTE_PMD_REGISTER_CRYPTO_DRIVER(mrvl_crypto_drv, cryptodev_mrvl_pmd_drv.driver,
 		cryptodev_driver_id);
-
-RTE_INIT(crypto_mrvl_init_log)
-{
-	mrvl_logtype_driver = rte_log_register("pmd.crypto.mvsam");
-}
+RTE_LOG_REGISTER(mrvl_logtype_driver, pmd.crypto.mvsam, NOTICE);

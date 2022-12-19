@@ -4,6 +4,7 @@
  * All rights reserved.
  */
 
+#include <rte_string_fns.h>
 #include <rte_ethdev_driver.h>
 #include <rte_kvargs.h>
 #include <rte_log.h>
@@ -83,8 +84,6 @@ static struct pp2_bpool *mrvl_port_to_bpool_lookup[RTE_MAX_ETHPORTS];
 static int mrvl_port_bpool_size[PP2_NUM_PKT_PROC][PP2_BPOOL_NUM_POOLS][RTE_MAX_LCORE];
 static uint64_t cookie_addr_high = MRVL_COOKIE_ADDR_INVALID;
 
-int mrvl_logtype;
-
 struct mrvl_ifnames {
 	const char *names[PP2_NUM_ETH_PPIO * PP2_NUM_PKT_PROC];
 	int idx;
@@ -143,6 +142,9 @@ static uint16_t mrvl_tx_pkt_burst(void *txq, struct rte_mbuf **tx_pkts,
 				  uint16_t nb_pkts);
 static uint16_t mrvl_tx_sg_pkt_burst(void *txq,	struct rte_mbuf **tx_pkts,
 				     uint16_t nb_pkts);
+static int rte_pmd_mrvl_remove(struct rte_vdev_device *vdev);
+static void mrvl_deinit_pp2(void);
+static void mrvl_deinit_hifs(void);
 
 
 #define MRVL_XSTATS_TBL_ENTRY(name) { \
@@ -396,12 +398,18 @@ mrvl_dev_configure(struct rte_eth_dev *dev)
 	    dev->data->dev_conf.rxmode.mq_mode == ETH_MQ_RX_RSS) {
 		MRVL_LOG(WARNING, "Disabling hash for 1 rx queue");
 		priv->ppio_params.inqs_params.hash_type = PP2_PPIO_HASH_T_NONE;
-
+		priv->configured = 1;
 		return 0;
 	}
 
-	return mrvl_configure_rss(priv,
-				  &dev->data->dev_conf.rx_adv_conf.rss_conf);
+	ret = mrvl_configure_rss(priv,
+			&dev->data->dev_conf.rx_adv_conf.rss_conf);
+	if (ret < 0)
+		return ret;
+
+	priv->configured = 1;
+
+	return 0;
 }
 
 /**
@@ -439,15 +447,15 @@ mrvl_mtu_set(struct rte_eth_dev *dev, uint16_t mtu)
 	 * when this feature has not been enabled/supported so far
 	 * (TODO check scattered_rx flag here once scattered RX is supported).
 	 */
-	if (mru + MRVL_PKT_OFFS > mbuf_data_size) {
-		mru = mbuf_data_size - MRVL_PKT_OFFS;
+	if (mru - RTE_ETHER_CRC_LEN + MRVL_PKT_OFFS > mbuf_data_size) {
+		mru = mbuf_data_size + RTE_ETHER_CRC_LEN - MRVL_PKT_OFFS;
 		mtu = MRVL_PP2_MRU_TO_MTU(mru);
-		MRVL_LOG(WARNING, "MTU too big, max MTU possible limitted "
+		MRVL_LOG(WARNING, "MTU too big, max MTU possible limited "
 			"by current mbuf size: %u. Set MTU to %u, MRU to %u",
 			mbuf_data_size, mtu, mru);
 	}
 
-	if (mtu < ETHER_MIN_MTU || mru > MRVL_PKT_SIZE_MAX) {
+	if (mtu < RTE_ETHER_MIN_MTU || mru > MRVL_PKT_SIZE_MAX) {
 		MRVL_LOG(ERR, "Invalid MTU [%u] or MRU [%u]", mtu, mru);
 		return -EINVAL;
 	}
@@ -669,18 +677,6 @@ mrvl_dev_start(struct rte_eth_dev *dev)
 		priv->uc_mc_flushed = 1;
 	}
 
-	if (!priv->vlan_flushed) {
-		ret = pp2_ppio_flush_vlan(priv->ppio);
-		if (ret) {
-			MRVL_LOG(ERR, "Failed to flush vlan list");
-			/*
-			 * TODO
-			 * once pp2_ppio_flush_vlan() is supported jump to out
-			 * goto out;
-			 */
-		}
-		priv->vlan_flushed = 1;
-	}
 	ret = mrvl_mtu_set(dev, dev->data->mtu);
 	if (ret)
 		MRVL_LOG(ERR, "Failed to set MTU to %d", dev->data->mtu);
@@ -812,7 +808,7 @@ mrvl_flush_bpool(struct rte_eth_dev *dev)
 	unsigned int core_id = rte_lcore_id();
 
 	if (core_id == LCORE_ID_ANY)
-		core_id = 0;
+		core_id = rte_get_main_lcore();
 
 	hif = mrvl_get_hif(priv, core_id);
 
@@ -841,10 +837,10 @@ mrvl_flush_bpool(struct rte_eth_dev *dev)
  * @param dev
  *   Pointer to Ethernet device structure.
  */
-static void
+static int
 mrvl_dev_stop(struct rte_eth_dev *dev)
 {
-	mrvl_dev_set_link_down(dev);
+	return mrvl_dev_set_link_down(dev);
 }
 
 /**
@@ -853,11 +849,14 @@ mrvl_dev_stop(struct rte_eth_dev *dev)
  * @param dev
  *   Pointer to Ethernet device structure.
  */
-static void
+static int
 mrvl_dev_close(struct rte_eth_dev *dev)
 {
 	struct mrvl_priv *priv = dev->data->dev_private;
 	size_t i;
+
+	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
+		return 0;
 
 	mrvl_flush_rx_queues(dev);
 	mrvl_flush_tx_shadow_queues(dev);
@@ -897,6 +896,24 @@ mrvl_dev_close(struct rte_eth_dev *dev)
 		pp2_cls_plcr_deinit(priv->default_policer);
 		priv->default_policer = NULL;
 	}
+
+
+	if (priv->bpool) {
+		pp2_bpool_deinit(priv->bpool);
+		used_bpools[priv->pp_id] &= ~(1 << priv->bpool_bit);
+		priv->bpool = NULL;
+	}
+
+	mrvl_dev_num--;
+
+	if (mrvl_dev_num == 0) {
+		MRVL_LOG(INFO, "Perform MUSDK deinit");
+		mrvl_deinit_hifs();
+		mrvl_deinit_pp2();
+		rte_mvep_deinit(MVEP_MOD_T_PP2);
+	}
+
+	return 0;
 }
 
 /**
@@ -974,22 +991,29 @@ mrvl_link_update(struct rte_eth_dev *dev, int wait_to_complete __rte_unused)
  *
  * @param dev
  *   Pointer to Ethernet device structure.
+ *
+ * @return
+ *   0 on success, negative error value otherwise.
  */
-static void
+static int
 mrvl_promiscuous_enable(struct rte_eth_dev *dev)
 {
 	struct mrvl_priv *priv = dev->data->dev_private;
 	int ret;
 
 	if (!priv->ppio)
-		return;
+		return 0;
 
 	if (priv->isolated)
-		return;
+		return 0;
 
 	ret = pp2_ppio_set_promisc(priv->ppio, 1);
-	if (ret)
+	if (ret) {
 		MRVL_LOG(ERR, "Failed to enable promiscuous mode");
+		return -EAGAIN;
+	}
+
+	return 0;
 }
 
 /**
@@ -997,22 +1021,29 @@ mrvl_promiscuous_enable(struct rte_eth_dev *dev)
  *
  * @param dev
  *   Pointer to Ethernet device structure.
+ *
+ * @return
+ *   0 on success, negative error value otherwise.
  */
-static void
+static int
 mrvl_allmulticast_enable(struct rte_eth_dev *dev)
 {
 	struct mrvl_priv *priv = dev->data->dev_private;
 	int ret;
 
 	if (!priv->ppio)
-		return;
+		return 0;
 
 	if (priv->isolated)
-		return;
+		return 0;
 
 	ret = pp2_ppio_set_mc_promisc(priv->ppio, 1);
-	if (ret)
+	if (ret) {
 		MRVL_LOG(ERR, "Failed enable all-multicast mode");
+		return -EAGAIN;
+	}
+
+	return 0;
 }
 
 /**
@@ -1020,19 +1051,26 @@ mrvl_allmulticast_enable(struct rte_eth_dev *dev)
  *
  * @param dev
  *   Pointer to Ethernet device structure.
+ *
+ * @return
+ *   0 on success, negative error value otherwise.
  */
-static void
+static int
 mrvl_promiscuous_disable(struct rte_eth_dev *dev)
 {
 	struct mrvl_priv *priv = dev->data->dev_private;
 	int ret;
 
 	if (!priv->ppio)
-		return;
+		return 0;
 
 	ret = pp2_ppio_set_promisc(priv->ppio, 0);
-	if (ret)
+	if (ret) {
 		MRVL_LOG(ERR, "Failed to disable promiscuous mode");
+		return -EAGAIN;
+	}
+
+	return 0;
 }
 
 /**
@@ -1040,19 +1078,26 @@ mrvl_promiscuous_disable(struct rte_eth_dev *dev)
  *
  * @param dev
  *   Pointer to Ethernet device structure.
+ *
+ * @return
+ *   0 on success, negative error value otherwise.
  */
-static void
+static int
 mrvl_allmulticast_disable(struct rte_eth_dev *dev)
 {
 	struct mrvl_priv *priv = dev->data->dev_private;
 	int ret;
 
 	if (!priv->ppio)
-		return;
+		return 0;
 
 	ret = pp2_ppio_set_mc_promisc(priv->ppio, 0);
-	if (ret)
+	if (ret) {
 		MRVL_LOG(ERR, "Failed to disable all-multicast mode");
+		return -EAGAIN;
+	}
+
+	return 0;
 }
 
 /**
@@ -1067,7 +1112,7 @@ static void
 mrvl_mac_addr_remove(struct rte_eth_dev *dev, uint32_t index)
 {
 	struct mrvl_priv *priv = dev->data->dev_private;
-	char buf[ETHER_ADDR_FMT_SIZE];
+	char buf[RTE_ETHER_ADDR_FMT_SIZE];
 	int ret;
 
 	if (!priv->ppio)
@@ -1079,7 +1124,7 @@ mrvl_mac_addr_remove(struct rte_eth_dev *dev, uint32_t index)
 	ret = pp2_ppio_remove_mac_addr(priv->ppio,
 				       dev->data->mac_addrs[index].addr_bytes);
 	if (ret) {
-		ether_format_addr(buf, sizeof(buf),
+		rte_ether_format_addr(buf, sizeof(buf),
 				  &dev->data->mac_addrs[index]);
 		MRVL_LOG(ERR, "Failed to remove mac %s", buf);
 	}
@@ -1101,11 +1146,11 @@ mrvl_mac_addr_remove(struct rte_eth_dev *dev, uint32_t index)
  *   0 on success, negative error value otherwise.
  */
 static int
-mrvl_mac_addr_add(struct rte_eth_dev *dev, struct ether_addr *mac_addr,
+mrvl_mac_addr_add(struct rte_eth_dev *dev, struct rte_ether_addr *mac_addr,
 		  uint32_t index, uint32_t vmdq __rte_unused)
 {
 	struct mrvl_priv *priv = dev->data->dev_private;
-	char buf[ETHER_ADDR_FMT_SIZE];
+	char buf[RTE_ETHER_ADDR_FMT_SIZE];
 	int ret;
 
 	if (priv->isolated)
@@ -1133,7 +1178,7 @@ mrvl_mac_addr_add(struct rte_eth_dev *dev, struct ether_addr *mac_addr,
 	 */
 	ret = pp2_ppio_add_mac_addr(priv->ppio, mac_addr->addr_bytes);
 	if (ret) {
-		ether_format_addr(buf, sizeof(buf), mac_addr);
+		rte_ether_format_addr(buf, sizeof(buf), mac_addr);
 		MRVL_LOG(ERR, "Failed to add mac %s", buf);
 		return -1;
 	}
@@ -1153,7 +1198,7 @@ mrvl_mac_addr_add(struct rte_eth_dev *dev, struct ether_addr *mac_addr,
  *   0 on success, negative error value otherwise.
  */
 static int
-mrvl_mac_addr_set(struct rte_eth_dev *dev, struct ether_addr *mac_addr)
+mrvl_mac_addr_set(struct rte_eth_dev *dev, struct rte_ether_addr *mac_addr)
 {
 	struct mrvl_priv *priv = dev->data->dev_private;
 	int ret;
@@ -1166,8 +1211,8 @@ mrvl_mac_addr_set(struct rte_eth_dev *dev, struct ether_addr *mac_addr)
 
 	ret = pp2_ppio_set_mac_addr(priv->ppio, mac_addr->addr_bytes);
 	if (ret) {
-		char buf[ETHER_ADDR_FMT_SIZE];
-		ether_format_addr(buf, sizeof(buf), mac_addr);
+		char buf[RTE_ETHER_ADDR_FMT_SIZE];
+		rte_ether_format_addr(buf, sizeof(buf), mac_addr);
 		MRVL_LOG(ERR, "Failed to set mac to %s", buf);
 	}
 
@@ -1281,15 +1326,18 @@ mrvl_stats_get(struct rte_eth_dev *dev, struct rte_eth_stats *stats)
  *
  * @param dev
  *   Pointer to Ethernet device structure.
+ *
+ * @return
+ *   0 on success, negative error value otherwise.
  */
-static void
+static int
 mrvl_stats_reset(struct rte_eth_dev *dev)
 {
 	struct mrvl_priv *priv = dev->data->dev_private;
 	int i;
 
 	if (!priv->ppio)
-		return;
+		return 0;
 
 	for (i = 0; i < dev->data->nb_rx_queues; i++) {
 		struct mrvl_rxq *rxq = dev->data->rx_queues[i];
@@ -1307,7 +1355,7 @@ mrvl_stats_reset(struct rte_eth_dev *dev)
 		txq->bytes_sent = 0;
 	}
 
-	pp2_ppio_get_statistics(priv->ppio, NULL, 1);
+	return pp2_ppio_get_statistics(priv->ppio, NULL, 1);
 }
 
 /**
@@ -1328,13 +1376,14 @@ mrvl_xstats_get(struct rte_eth_dev *dev,
 {
 	struct mrvl_priv *priv = dev->data->dev_private;
 	struct pp2_ppio_statistics ppio_stats;
-	unsigned int i;
+	unsigned int i, count;
 
-	if (!stats)
-		return 0;
+	count = RTE_DIM(mrvl_xstats_tbl);
+	if (n < count)
+		return count;
 
 	pp2_ppio_get_statistics(priv->ppio, &ppio_stats, 0);
-	for (i = 0; i < n && i < RTE_DIM(mrvl_xstats_tbl); i++) {
+	for (i = 0; i < count; i++) {
 		uint64_t val;
 
 		if (mrvl_xstats_tbl[i].size == sizeof(uint32_t))
@@ -1350,7 +1399,7 @@ mrvl_xstats_get(struct rte_eth_dev *dev,
 		stats[i].value = val;
 	}
 
-	return n;
+	return count;
 }
 
 /**
@@ -1358,11 +1407,14 @@ mrvl_xstats_get(struct rte_eth_dev *dev,
  *
  * @param dev
  *   Pointer to Ethernet device structure.
+ *
+ * @return
+ *   0 on success, negative error value otherwise.
  */
-static void
+static int
 mrvl_xstats_reset(struct rte_eth_dev *dev)
 {
-	mrvl_stats_reset(dev);
+	return mrvl_stats_reset(dev);
 }
 
 /**
@@ -1388,8 +1440,8 @@ mrvl_xstats_get_names(struct rte_eth_dev *dev __rte_unused,
 		return RTE_DIM(mrvl_xstats_tbl);
 
 	for (i = 0; i < size && i < RTE_DIM(mrvl_xstats_tbl); i++)
-		snprintf(xstats_names[i].name, RTE_ETH_XSTATS_NAME_SIZE, "%s",
-			 mrvl_xstats_tbl[i].name);
+		strlcpy(xstats_names[i].name, mrvl_xstats_tbl[i].name,
+			RTE_ETH_XSTATS_NAME_SIZE);
 
 	return size;
 }
@@ -1402,7 +1454,7 @@ mrvl_xstats_get_names(struct rte_eth_dev *dev __rte_unused,
  * @param info
  *   Info structure output buffer.
  */
-static void
+static int
 mrvl_dev_infos_get(struct rte_eth_dev *dev __rte_unused,
 		   struct rte_eth_dev_info *info)
 {
@@ -1437,6 +1489,8 @@ mrvl_dev_infos_get(struct rte_eth_dev *dev __rte_unused,
 	info->default_rxconf.rx_drop_en = 1;
 
 	info->max_rx_pktlen = MRVL_PKT_SIZE_MAX;
+
+	return 0;
 }
 
 /**
@@ -1555,8 +1609,8 @@ mrvl_vlan_filter_set(struct rte_eth_dev *dev, uint16_t vlan_id, int on)
 static int
 mrvl_fill_bpool(struct mrvl_rxq *rxq, int num)
 {
-	struct buff_release_entry entries[MRVL_PP2_RXD_MAX];
-	struct rte_mbuf *mbufs[MRVL_PP2_RXD_MAX];
+	struct buff_release_entry entries[num];
+	struct rte_mbuf *mbufs[num];
 	int i, ret;
 	unsigned int core_id;
 	struct pp2_hif *hif;
@@ -1564,7 +1618,7 @@ mrvl_fill_bpool(struct mrvl_rxq *rxq, int num)
 
 	core_id = rte_lcore_id();
 	if (core_id == LCORE_ID_ANY)
-		core_id = 0;
+		core_id = rte_get_main_lcore();
 
 	hif = mrvl_get_hif(rxq->priv, core_id);
 	if (!hif)
@@ -1652,7 +1706,8 @@ mrvl_rx_queue_setup(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 		return -EFAULT;
 	}
 
-	frame_size = buf_size - RTE_PKTMBUF_HEADROOM - MRVL_PKT_EFFEC_OFFS;
+	frame_size = buf_size - RTE_PKTMBUF_HEADROOM -
+		     MRVL_PKT_EFFEC_OFFS + RTE_ETHER_CRC_LEN;
 	if (frame_size < max_rx_pkt_len) {
 		MRVL_LOG(WARNING,
 			"Mbuf size must be increased to %u bytes to hold up "
@@ -1714,7 +1769,7 @@ mrvl_rx_queue_release(void *rxq)
 	unsigned int core_id = rte_lcore_id();
 
 	if (core_id == LCORE_ID_ANY)
-		core_id = 0;
+		core_id = rte_get_main_lcore();
 
 	if (!q)
 		return;
@@ -2112,7 +2167,6 @@ mrvl_desc_to_packet_type_and_offset(struct pp2_ppio_desc *desc,
 		*l4_offset = *l3_offset + MRVL_ARP_LENGTH;
 		break;
 	default:
-		MRVL_LOG(DEBUG, "Failed to recognise l3 packet type");
 		break;
 	}
 
@@ -2124,7 +2178,6 @@ mrvl_desc_to_packet_type_and_offset(struct pp2_ppio_desc *desc,
 		packet_type |= RTE_PTYPE_L4_UDP;
 		break;
 	default:
-		MRVL_LOG(DEBUG, "Failed to recognise l4 packet type");
 		break;
 	}
 
@@ -2194,10 +2247,9 @@ mrvl_rx_pkt_burst(void *rxq, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
 
 	ret = pp2_ppio_recv(q->priv->ppio, q->priv->rxq_map[q->queue_id].tc,
 			    q->priv->rxq_map[q->queue_id].inq, descs, &nb_pkts);
-	if (unlikely(ret < 0)) {
-		MRVL_LOG(ERR, "Failed to receive packets");
+	if (unlikely(ret < 0))
 		return 0;
-	}
+
 	mrvl_port_bpool_size[bpool->pp2_id][bpool->id][core_id] -= nb_pkts;
 
 	for (i = 0; i < nb_pkts; i++) {
@@ -2260,20 +2312,12 @@ mrvl_rx_pkt_burst(void *rxq, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
 
 		if (unlikely(num <= q->priv->bpool_min_size ||
 			     (!rx_done && num < q->priv->bpool_init_size))) {
-			ret = mrvl_fill_bpool(q, MRVL_BURST_SIZE);
-			if (ret)
-				MRVL_LOG(ERR, "Failed to fill bpool");
+			mrvl_fill_bpool(q, MRVL_BURST_SIZE);
 		} else if (unlikely(num > q->priv->bpool_max_size)) {
 			int i;
 			int pkt_to_remove = num - q->priv->bpool_init_size;
 			struct rte_mbuf *mbuf;
 			struct pp2_buff_inf buff;
-
-			MRVL_LOG(DEBUG,
-				"port-%d:%d: bpool %d oversize - remove %d buffers (pool size: %d -> %d)",
-				bpool->pp2_id, q->priv->ppio->port_id,
-				bpool->id, pkt_to_remove, num,
-				q->priv->bpool_init_size);
 
 			for (i = 0; i < pkt_to_remove; i++) {
 				ret = pp2_bpool_get_buff(hif, bpool, &buff);
@@ -2467,12 +2511,8 @@ mrvl_tx_pkt_burst(void *txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 				       sq, q->queue_id, 0);
 
 	sq_free_size = MRVL_PP2_TX_SHADOWQ_SIZE - sq->size - 1;
-	if (unlikely(nb_pkts > sq_free_size)) {
-		MRVL_LOG(DEBUG,
-			"No room in shadow queue for %d packets! %d packets will be sent.",
-			nb_pkts, sq_free_size);
+	if (unlikely(nb_pkts > sq_free_size))
 		nb_pkts = sq_free_size;
-	}
 
 	for (i = 0; i < nb_pkts; i++) {
 		struct rte_mbuf *mbuf = tx_pkts[i];
@@ -2589,10 +2629,6 @@ mrvl_tx_sg_pkt_burst(void *txq, struct rte_mbuf **tx_pkts,
 		 */
 		if (unlikely(total_descs > sq_free_size)) {
 			total_descs -= nb_segs;
-			RTE_LOG(DEBUG, PMD,
-				"No room in shadow queue for %d packets! "
-				"%d packets will be sent.\n",
-				nb_pkts, i);
 			break;
 		}
 
@@ -2786,7 +2822,7 @@ mrvl_eth_dev_create(struct rte_vdev_device *vdev, const char *name)
 
 	eth_dev->data->mac_addrs =
 		rte_zmalloc("mac_addrs",
-			    ETHER_ADDR_LEN * MRVL_MAC_ADDRS_MAX, 0);
+			    RTE_ETHER_ADDR_LEN * MRVL_MAC_ADDRS_MAX, 0);
 	if (!eth_dev->data->mac_addrs) {
 		MRVL_LOG(ERR, "Failed to allocate space for eth addrs");
 		ret = -ENOMEM;
@@ -2800,13 +2836,13 @@ mrvl_eth_dev_create(struct rte_vdev_device *vdev, const char *name)
 		goto out_free;
 
 	memcpy(eth_dev->data->mac_addrs[0].addr_bytes,
-	       req.ifr_addr.sa_data, ETHER_ADDR_LEN);
+	       req.ifr_addr.sa_data, RTE_ETHER_ADDR_LEN);
 
-	eth_dev->data->kdrv = RTE_KDRV_NONE;
 	eth_dev->device = &vdev->device;
 	eth_dev->rx_pkt_burst = mrvl_rx_pkt_burst;
 	mrvl_set_tx_function(eth_dev);
 	eth_dev->dev_ops = &mrvl_ops;
+	eth_dev->data->dev_flags |= RTE_ETH_DEV_AUTOFILL_QUEUE_XSTATS;
 
 	rte_eth_dev_probing_finish(eth_dev);
 	return 0;
@@ -2814,28 +2850,6 @@ out_free:
 	rte_eth_dev_release_port(eth_dev);
 
 	return ret;
-}
-
-/**
- * Cleanup previously created device representing Ethernet port.
- *
- * @param name
- *   Pointer to the port name.
- */
-static void
-mrvl_eth_dev_destroy(const char *name)
-{
-	struct rte_eth_dev *eth_dev;
-	struct mrvl_priv *priv;
-
-	eth_dev = rte_eth_dev_allocated(name);
-	if (!eth_dev)
-		return;
-
-	priv = eth_dev->data->dev_private;
-	pp2_bpool_deinit(priv->bpool);
-	used_bpools[priv->pp_id] &= ~(1 << priv->bpool_bit);
-	rte_eth_dev_release_port(eth_dev);
 }
 
 /**
@@ -2958,20 +2972,15 @@ init_devices:
 		ret = mrvl_eth_dev_create(vdev, ifnames.names[i]);
 		if (ret)
 			goto out_cleanup;
+		mrvl_dev_num++;
 	}
-	mrvl_dev_num += ifnum;
 
 	rte_kvargs_free(kvlist);
 
 	return 0;
 out_cleanup:
-	for (; i > 0; i--)
-		mrvl_eth_dev_destroy(ifnames.names[i]);
+	rte_pmd_mrvl_remove(vdev);
 
-	if (mrvl_dev_num == 0) {
-		mrvl_deinit_pp2();
-		rte_mvep_deinit(MVEP_MOD_T_PP2);
-	}
 out_free_kvlist:
 	rte_kvargs_free(kvlist);
 
@@ -2990,31 +2999,16 @@ out_free_kvlist:
 static int
 rte_pmd_mrvl_remove(struct rte_vdev_device *vdev)
 {
-	int i;
-	const char *name;
+	uint16_t port_id;
+	int ret = 0;
 
-	name = rte_vdev_device_name(vdev);
-	if (!name)
-		return -EINVAL;
-
-	MRVL_LOG(INFO, "Removing %s", name);
-
-	RTE_ETH_FOREACH_DEV(i) { /* FIXME: removing all devices! */
-		char ifname[RTE_ETH_NAME_MAX_LEN];
-
-		rte_eth_dev_get_name_by_port(i, ifname);
-		mrvl_eth_dev_destroy(ifname);
-		mrvl_dev_num--;
+	RTE_ETH_FOREACH_DEV(port_id) {
+		if (rte_eth_devices[port_id].device != &vdev->device)
+			continue;
+		ret |= rte_eth_dev_close(port_id);
 	}
 
-	if (mrvl_dev_num == 0) {
-		MRVL_LOG(INFO, "Perform MUSDK deinit");
-		mrvl_deinit_hifs();
-		mrvl_deinit_pp2();
-		rte_mvep_deinit(MVEP_MOD_T_PP2);
-	}
-
-	return 0;
+	return ret == 0 ? 0 : -EIO;
 }
 
 static struct rte_vdev_driver pmd_mrvl_drv = {
@@ -3024,10 +3018,4 @@ static struct rte_vdev_driver pmd_mrvl_drv = {
 
 RTE_PMD_REGISTER_VDEV(net_mvpp2, pmd_mrvl_drv);
 RTE_PMD_REGISTER_ALIAS(net_mvpp2, eth_mvpp2);
-
-RTE_INIT(mrvl_init_log)
-{
-	mrvl_logtype = rte_log_register("pmd.net.mvpp2");
-	if (mrvl_logtype >= 0)
-		rte_log_set_level(mrvl_logtype, RTE_LOG_NOTICE);
-}
+RTE_LOG_REGISTER(mrvl_logtype, pmd.net.mvpp2, NOTICE);

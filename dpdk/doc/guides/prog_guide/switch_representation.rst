@@ -59,9 +59,9 @@ which can be thought as a software "patch panel" front-end for applications.
 
 ::
 
-   -w pci:dbdf,representor=0
-   -w pci:dbdf,representor=[0-3]
-   -w pci:dbdf,representor=[0,5-11]
+   -a pci:dbdf,representor=0
+   -a pci:dbdf,representor=[0-3]
+   -a pci:dbdf,representor=[0,5-11]
 
 - As virtual devices, they may be more limited than their physical
   counterparts, for instance by exposing only a subset of device
@@ -348,8 +348,7 @@ these endpoints provides a standard interface to manage their
 interconnection without introducing new concepts and whole new API to
 implement them. This is described in `flow API (rte_flow)`_.
 
-.. [6] `Generic flow API (rte_flow)
-       <http://doc.dpdk.org/guides/prog_guide/rte_flow.html>`_
+.. [6] :doc:`Generic flow API (rte_flow) <rte_flow>`
 
 Flow API (rte_flow)
 -------------------
@@ -736,8 +735,7 @@ respective representors (**B** and **C**) if supported.
 Examples in subsequent sections apply to hypervisor applications only and
 are based on port representors **A**, **B** and **C**.
 
-.. [2] `Flow syntax
-    <http://doc.dpdk.org/guides/testpmd_app_ug/testpmd_funcs.html#flow-syntax>`_
+.. [2] :ref:`Flow syntax <testpmd_rte_flow>`
 
 Associating VF 1 with Physical Port 0
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

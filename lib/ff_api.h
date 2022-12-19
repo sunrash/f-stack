@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 THL A29 Limited, a Tencent company.
+ * Copyright (C) 2017-2021 THL A29 Limited, a Tencent company.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -41,22 +41,13 @@ extern "C" {
 
 struct linux_sockaddr {
     short sa_family;
-    char sa_data[126];
+    char sa_data[14];
 };
 
-/* AF_INET6/PF_INET6 is 10 in linux
- * defined 28 for FreeBSD
- */
-#ifdef AF_INET6
-#undef AF_INET6
-#endif
-#ifdef PF_INET6
-#undef PF_INET6
-#endif
-#define AF_INET6    28
-#define PF_INET6    AF_INET6
 #define AF_INET6_LINUX    10
 #define PF_INET6_LINUX    AF_INET6_LINUX
+#define AF_INET6_FREEBSD    28
+#define PF_INET6_FREEBSD    AF_INET6_FREEBSD
 
 typedef int (*loop_func_t)(void *arg);
 
@@ -115,10 +106,10 @@ int ff_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
 int ff_poll(struct pollfd fds[], nfds_t nfds, int timeout);
 
 int ff_kqueue(void);
-int ff_kevent(int kq, const struct kevent *changelist, int nchanges, 
+int ff_kevent(int kq, const struct kevent *changelist, int nchanges,
     struct kevent *eventlist, int nevents, const struct timespec *timeout);
-int ff_kevent_do_each(int kq, const struct kevent *changelist, int nchanges, 
-    void *eventlist, int nevents, const struct timespec *timeout, 
+int ff_kevent_do_each(int kq, const struct kevent *changelist, int nchanges,
+    void *eventlist, int nevents, const struct timespec *timeout,
     void (*do_each)(void **, struct kevent *));
 
 int ff_gettimeofday(struct timeval *tv, struct timezone *tz);
@@ -190,6 +181,34 @@ void ff_regist_packet_dispatcher(dispatch_func_t func);
 
 /* dispatch api end */
 
+/* pcb lddr api begin */
+/*
+ * pcb lddr callback function.
+ * Implemented by user.
+ *
+ * @param family
+ *   The remote server addr, should be AF_INET or AF_INET6.
+ * @param dst_addr
+ *   The remote server addr, should be (in_addr *) or (in6_addr *).
+ * @param dst_port
+ *   The remote server port.
+ * @param src_addr
+ *   Return parameter.
+ *   The local addr, should be (in_addr *) or (in6_addr *).
+ *   If set (INADDR_ANY) or (in6addr_any), the app then will
+ *   call `in_pcbladdr()` to get laddr.
+ *
+ * @return error_no
+ *   0 means success.
+ *
+ */
+typedef int (*pcblddr_func_t)(uint16_t family, void *dst_addr,
+    uint16_t dst_port, void *src_addr);
+
+/* regist a pcb lddr function */
+void ff_regist_pcblddr_fun(pcblddr_func_t func);
+
+/* pcb lddr api end */
 
 /* internal api begin */
 
@@ -221,6 +240,64 @@ enum FF_NGCTL_CMD {
 int ff_ngctl(int cmd, void *data);
 
 /* internal api end */
+
+/* zero ccopy API begin */
+struct ff_zc_mbuf {
+    void *bsd_mbuf;         /* point to the head mbuf */
+    void *bsd_mbuf_off;     /* ponit to the current mbuf in the mbuf chain with offset */
+    int off;                /* the offset of total mbuf, APP shouldn't modify it */
+    int len;                /* the total len of the mbuf chain */
+};
+
+/*
+ * Get the ff zero copy mbuf.
+ *
+ * @param m
+ *   The ponitor of 'sturct ff_zc_mbuf', and can't be NULL.
+ *   Can used by 'ff_zc_mbuf_write' and 'ff_zc_mbuf_read'.
+ * @param len
+ *   The total buf len of mbuf chain that you want to alloc.
+ *
+ * @return error_no
+ *   0 means success.
+ *  -1 means error.
+ */
+int ff_zc_mbuf_get(struct ff_zc_mbuf *m, int len);
+
+/*
+ * Write data to the mbuf chain in 'sturct ff_zc_mbuf'.
+ * APP can call this function multiple times, need pay attion to the offset of data.
+ * but the total len can't be larger than m->len.
+ * After this fuction return success,
+ *
+ * the struct 'ff_zc_mbuf *m' can be reused in `ff_zc_mbuf_get` and then Use normally.
+ * Nerver directly reused in `ff_zc_mbuf_write` before recall `ff_zc_mbuf_get`.
+ *
+ * APP nedd call 'ff_write' to send data actually after finish write data to mbuf,
+ * And use 'bsd_mbuf' of 'struct ff_zc_mbuf' as the 'buf' argument.
+ *
+ * See 'example/main_zc.c'
+ *
+ * @param m
+ *   The ponitor of 'sturct ff_zc_mbuf', must be call 'ff_zc_mbuf_get' first.
+ * @param data
+ *   The pointer of data that want to write to socket, need pay attion to the offset.
+ * @param len
+ *   The len that APP want to write to mbuf chain this time.
+ *
+ * @return error_no
+ *   0 means success.
+ *  -1 means error.
+ */
+int ff_zc_mbuf_write(struct ff_zc_mbuf *m, const char *data, int len);
+
+/*
+ * Read data to the mbuf chain in 'sturct ff_zc_mbuf'.
+ * not implemented now.
+ */
+int ff_zc_mbuf_read(struct ff_zc_mbuf *m, const char *data, int len);
+
+/* ZERO COPY API end */
 
 #ifdef __cplusplus
 }

@@ -80,7 +80,7 @@ resolve_xsym(const char *sn, size_t ofs, struct ebpf_insn *ins, size_t ins_sz,
 	if (type == RTE_BPF_XTYPE_FUNC) {
 
 		/* we don't support multiple functions per BPF module,
-		 * so treat EBPF_PSEUDO_CALL to extrernal function
+		 * so treat EBPF_PSEUDO_CALL to external function
 		 * as an ordinary EBPF_CALL.
 		 */
 		if (ins[idx].src_reg == EBPF_PSEUDO_CALL) {
@@ -294,7 +294,7 @@ bpf_load_elf(const struct rte_bpf_prm *prm, int32_t fd, const char *section)
 	return bpf;
 }
 
-__rte_experimental struct rte_bpf *
+struct rte_bpf *
 rte_bpf_elf_load(const struct rte_bpf_prm *prm, const char *fname,
 	const char *sname)
 {

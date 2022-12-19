@@ -4,17 +4,17 @@
 
 #include <string.h>
 
+#include <rte_string_fns.h>
 #include <rte_eal.h>
 #include <rte_eal_memconfig.h>
 #include <rte_memory.h>
 #include <rte_malloc.h>
 #include <rte_errno.h>
+#include <rte_tailq.h>
 
 #include "rte_member.h"
 #include "rte_member_ht.h"
 #include "rte_member_vbf.h"
-
-int librte_member_logtype;
 
 TAILQ_HEAD(rte_member_list, rte_tailq_entry);
 static struct rte_tailq_elem rte_member_tailq = {
@@ -31,13 +31,13 @@ rte_member_find_existing(const char *name)
 
 	member_list = RTE_TAILQ_CAST(rte_member_tailq.head, rte_member_list);
 
-	rte_rwlock_read_lock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_read_lock();
 	TAILQ_FOREACH(te, member_list, next) {
 		setsum = (struct rte_member_setsum *) te->data;
 		if (strncmp(name, setsum->name, RTE_MEMBER_NAMESIZE) == 0)
 			break;
 	}
-	rte_rwlock_read_unlock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_read_unlock();
 
 	if (te == NULL) {
 		rte_errno = ENOENT;
@@ -55,17 +55,17 @@ rte_member_free(struct rte_member_setsum *setsum)
 	if (setsum == NULL)
 		return;
 	member_list = RTE_TAILQ_CAST(rte_member_tailq.head, rte_member_list);
-	rte_rwlock_write_lock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_write_lock();
 	TAILQ_FOREACH(te, member_list, next) {
 		if (te->data == (void *)setsum)
 			break;
 	}
 	if (te == NULL) {
-		rte_rwlock_write_unlock(RTE_EAL_TAILQ_RWLOCK);
+		rte_mcfg_tailq_write_unlock();
 		return;
 	}
 	TAILQ_REMOVE(member_list, te, next);
-	rte_rwlock_write_unlock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_write_unlock();
 
 	switch (setsum->type) {
 	case RTE_MEMBER_TYPE_HT:
@@ -104,7 +104,7 @@ rte_member_create(const struct rte_member_parameters *params)
 
 	member_list = RTE_TAILQ_CAST(rte_member_tailq.head, rte_member_list);
 
-	rte_rwlock_write_lock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_write_lock();
 
 	TAILQ_FOREACH(te, member_list, next) {
 		setsum = te->data;
@@ -132,7 +132,7 @@ rte_member_create(const struct rte_member_parameters *params)
 		RTE_MEMBER_LOG(ERR, "Create setsummary failed\n");
 		goto error_unlock_exit;
 	}
-	snprintf(setsum->name, sizeof(setsum->name), "%s", params->name);
+	strlcpy(setsum->name, params->name, sizeof(setsum->name));
 	setsum->type = params->type;
 	setsum->socket_id = params->socket_id;
 	setsum->key_len = params->key_len;
@@ -158,13 +158,13 @@ rte_member_create(const struct rte_member_parameters *params)
 
 	te->data = (void *)setsum;
 	TAILQ_INSERT_TAIL(member_list, te, next);
-	rte_rwlock_write_unlock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_write_unlock();
 	return setsum;
 
 error_unlock_exit:
 	rte_free(te);
 	rte_free(setsum);
-	rte_rwlock_write_unlock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_write_unlock();
 	return NULL;
 }
 
@@ -297,9 +297,4 @@ rte_member_reset(const struct rte_member_setsum *setsum)
 	}
 }
 
-RTE_INIT(librte_member_init_log)
-{
-	librte_member_logtype = rte_log_register("lib.member");
-	if (librte_member_logtype >= 0)
-		rte_log_set_level(librte_member_logtype, RTE_LOG_DEBUG);
-}
+RTE_LOG_REGISTER(librte_member_logtype, lib.member, DEBUG);

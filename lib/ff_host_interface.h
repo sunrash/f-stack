@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2013 Patrick Kelsey. All rights reserved.
- * Copyright (C) 2017 THL A29 Limited, a Tencent company.
+ * Copyright (C) 2017-2021 THL A29 Limited, a Tencent company.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -61,7 +61,7 @@ uint64_t ff_get_tsc_ns(void);
 void ff_get_current_time(int64_t *sec, long *nsec);
 void ff_update_current_ts(void);
 
-typedef void * ff_mutex_t;
+typedef volatile uintptr_t ff_mutex_t;
 typedef void * ff_cond_t;
 typedef void * ff_rwlock_t;
 
@@ -72,6 +72,8 @@ int ff_setenv(const char *name, const char *value);
 char *ff_getenv(const char *name);
 
 void ff_os_errno(int error);
+
+int ff_in_pcbladdr(uint16_t family, void *faddr, uint16_t fport, void *laddr);
 
 int ff_rss_check(void *softc, uint32_t saddr, uint32_t daddr,
     uint16_t sport, uint16_t dport);

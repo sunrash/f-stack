@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 THL A29 Limited, a Tencent company.
+ * Copyright (C) 2017-2021 THL A29 Limited, a Tencent company.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -33,6 +33,7 @@
 void ff_set_proc_id(int pid);
 
 int ff_ipc_init(void);
+void ff_ipc_exit(void);
 struct ff_msg *ff_ipc_msg_alloc(void);
 int ff_ipc_msg_free(struct ff_msg *msg);
 

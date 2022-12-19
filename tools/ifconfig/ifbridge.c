@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright 2001 Wasabi Systems, Inc.
  * All rights reserved.
  *
@@ -58,39 +60,15 @@ static const char rcsid[] =
 #include <unistd.h>
 #include <err.h>
 #include <errno.h>
+#ifdef FSTACK
+#include <rte_malloc.h>
+#endif
 
 #include "ifconfig.h"
 
-#define PV2ID(pv, epri, eaddr)  do {		\
-		epri     = pv >> 48;		\
-		eaddr[0] = pv >> 40;		\
-		eaddr[1] = pv >> 32;		\
-		eaddr[2] = pv >> 24;		\
-		eaddr[3] = pv >> 16;		\
-		eaddr[4] = pv >> 8;		\
-		eaddr[5] = pv >> 0;		\
-} while (0)
-
-static const char *stpstates[] = {
-	"disabled",
-	"listening",
-	"learning",
-	"forwarding",
-	"blocking",
-	"discarding"
-};
-static const char *stpproto[] = {
-	"stp",
-	"-",
-	"rstp"
-};
-static const char *stproles[] = {
-	"disabled",
-	"root",
-	"designated",
-	"alternate",
-	"backup"
-};
+static const char *stpstates[] = { STP_STATES };
+static const char *stpproto[] = { STP_PROTOS };
+static const char *stproles[] = { STP_ROLES };
 
 static int
 get_val(const char *cp, u_long *valp)
@@ -124,7 +102,7 @@ do_cmd(int sock, u_long op, void *arg, size_t argsize, int set)
 #else
 	size_t offset = (char *)&(ifd.ifd_data) - (char *)&(ifd);
 	return (ioctl_va(sock, set ? SIOCSDRVSPEC : SIOCGDRVSPEC, &ifd,
-		3, offset, arg, argsize));
+	    3, offset, arg, argsize));
 #endif
 }
 
@@ -166,7 +144,11 @@ bridge_interfaces(int s, const char *prefix)
 	}
 
 	for (;;) {
+#ifndef FSTACK
 		ninbuf = realloc(inbuf, len);
+#else
+		ninbuf = rte_malloc(NULL, len, 0);
+#endif
 		if (ninbuf == NULL)
 			err(1, "unable to allocate interface buffer");
 		bifc.ifbic_len = len;
@@ -211,8 +193,12 @@ bridge_interfaces(int s, const char *prefix)
 		}
 		printf("\n");
 	}
-
+	free(pad);
+#ifndef FSTACK
 	free(inbuf);
+#else
+	rte_free(inbuf);
+#endif
 }
 
 static void

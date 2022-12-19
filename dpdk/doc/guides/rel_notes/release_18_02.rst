@@ -142,9 +142,9 @@ New Features
   * ``VIRTIO_NET_F_GUEST_UFO``, ``VIRTIO_NET_F_HOST_UFO``
   * ``VIRTIO_NET_F_GSO``
 
-  Also added ``VIRTIO_NET_F_GUEST_ANNOUNCE`` feature support in virtio pmd.
+  Also added ``VIRTIO_NET_F_GUEST_ANNOUNCE`` feature support in virtio PMD.
   In a scenario where the vhost backend doesn't have the ability to generate
-  RARP packets, the VM running virtio pmd can still be live migrated if
+  RARP packets, the VM running virtio PMD can still be live migrated if
   ``VIRTIO_NET_F_GUEST_ANNOUNCE`` feature is negotiated.
 
 * **Updated the AESNI-MB PMD.**
@@ -210,7 +210,7 @@ New Features
   A set of northbound APIs have been defined which encompass a generic set of
   operations by allowing applications to interact with device using opaque
   structures/buffers. Also, southbound APIs provide a means of integrating devices
-  either as as part of a physical bus (PCI, FSLMC etc) or through ``vdev``.
+  either as part of a physical bus (PCI, FSLMC etc) or through ``vdev``.
 
   See the :doc:`../prog_guide/rawdev` programmer's guide for more details.
 

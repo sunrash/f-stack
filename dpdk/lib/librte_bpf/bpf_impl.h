@@ -2,8 +2,8 @@
  * Copyright(c) 2018 Intel Corporation
  */
 
-#ifndef _BPF_H_
-#define _BPF_H_
+#ifndef BPF_IMPL_H
+#define BPF_IMPL_H
 
 #include <rte_bpf.h>
 #include <sys/mman.h>
@@ -25,9 +25,8 @@ extern int bpf_validate(struct rte_bpf *bpf);
 
 extern int bpf_jit(struct rte_bpf *bpf);
 
-#ifdef RTE_ARCH_X86_64
 extern int bpf_jit_x86(struct rte_bpf *);
-#endif
+extern int bpf_jit_arm64(struct rte_bpf *);
 
 extern int rte_bpf_logtype;
 
@@ -52,4 +51,4 @@ bpf_size(uint32_t bpf_op_sz)
 }
 #endif
 
-#endif /* _BPF_H_ */
+#endif /* BPF_IMPL_H */

@@ -1,35 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2013 Tilera Corporation. All rights reserved.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Tilera Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright 2014-2020 Mellanox Technologies, Ltd
  */
 
 #include <stdarg.h>
@@ -72,22 +42,22 @@
 
 /* hardcoded configuration (for now) */
 static unsigned cfg_n_flows	= 1024;
-static uint32_t cfg_ip_src	= IPv4(10, 254, 0, 0);
-static uint32_t cfg_ip_dst	= IPv4(10, 253, 0, 0);
+static uint32_t cfg_ip_src	= RTE_IPV4(10, 254, 0, 0);
+static uint32_t cfg_ip_dst	= RTE_IPV4(10, 253, 0, 0);
 static uint16_t cfg_udp_src	= 1000;
 static uint16_t cfg_udp_dst	= 1001;
-static struct ether_addr cfg_ether_src	=
+static struct rte_ether_addr cfg_ether_src =
 	{{ 0x00, 0x01, 0x02, 0x03, 0x04, 0x00 }};
-static struct ether_addr cfg_ether_dst	=
+static struct rte_ether_addr cfg_ether_dst =
 	{{ 0x00, 0x01, 0x02, 0x03, 0x04, 0x01 }};
 
 #define IP_DEFTTL  64   /* from RFC 1340. */
-#define IP_VERSION 0x40
-#define IP_HDRLEN  0x05 /* default IP header length == five 32-bits words. */
-#define IP_VHL_DEF (IP_VERSION | IP_HDRLEN)
+
+/* Use this type to inform GCC that ip_sum violates aliasing rules. */
+typedef unaligned_uint16_t alias_int16_t __attribute__((__may_alias__));
 
 static inline uint16_t
-ip_sum(const unaligned_uint16_t *hdr, int hdr_len)
+ip_sum(const alias_int16_t *hdr, int hdr_len)
 {
 	uint32_t sum = 0;
 
@@ -119,9 +89,9 @@ pkt_burst_flow_gen(struct fwd_stream *fs)
 	struct rte_mbuf  *pkts_burst[MAX_PKT_BURST];
 	struct rte_mempool *mbp;
 	struct rte_mbuf  *pkt;
-	struct ether_hdr *eth_hdr;
-	struct ipv4_hdr *ip_hdr;
-	struct udp_hdr *udp_hdr;
+	struct rte_ether_hdr *eth_hdr;
+	struct rte_ipv4_hdr *ip_hdr;
+	struct rte_udp_hdr *udp_hdr;
 	uint16_t vlan_tci, vlan_tci_outer;
 	uint64_t ol_flags = 0;
 	uint16_t nb_rx;
@@ -130,16 +100,10 @@ pkt_burst_flow_gen(struct fwd_stream *fs)
 	uint16_t i;
 	uint32_t retry;
 	uint64_t tx_offloads;
-#ifdef RTE_TEST_PMD_RECORD_CORE_CYCLES
-	uint64_t start_tsc;
-	uint64_t end_tsc;
-	uint64_t core_cycles;
-#endif
+	uint64_t start_tsc = 0;
 	static int next_flow = 0;
 
-#ifdef RTE_TEST_PMD_RECORD_CORE_CYCLES
-	start_tsc = rte_rdtsc();
-#endif
+	get_start_cycles(&start_tsc);
 
 	/* Receive a burst of packets and discard them. */
 	nb_rx = rte_eth_rx_burst(fs->rx_port, fs->rx_queue, pkts_burst,
@@ -170,15 +134,15 @@ pkt_burst_flow_gen(struct fwd_stream *fs)
 		pkt->next = NULL;
 
 		/* Initialize Ethernet header. */
-		eth_hdr = rte_pktmbuf_mtod(pkt, struct ether_hdr *);
-		ether_addr_copy(&cfg_ether_dst, &eth_hdr->d_addr);
-		ether_addr_copy(&cfg_ether_src, &eth_hdr->s_addr);
-		eth_hdr->ether_type = rte_cpu_to_be_16(ETHER_TYPE_IPv4);
+		eth_hdr = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
+		rte_ether_addr_copy(&cfg_ether_dst, &eth_hdr->d_addr);
+		rte_ether_addr_copy(&cfg_ether_src, &eth_hdr->s_addr);
+		eth_hdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
 
 		/* Initialize IP header. */
-		ip_hdr = (struct ipv4_hdr *)(eth_hdr + 1);
+		ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
 		memset(ip_hdr, 0, sizeof(*ip_hdr));
-		ip_hdr->version_ihl	= IP_VHL_DEF;
+		ip_hdr->version_ihl	= RTE_IPV4_VHL_DEF;
 		ip_hdr->type_of_service	= 0;
 		ip_hdr->fragment_offset	= 0;
 		ip_hdr->time_to_live	= IP_DEFTTL;
@@ -189,11 +153,11 @@ pkt_burst_flow_gen(struct fwd_stream *fs)
 							   next_flow);
 		ip_hdr->total_length	= RTE_CPU_TO_BE_16(pkt_size -
 							   sizeof(*eth_hdr));
-		ip_hdr->hdr_checksum	= ip_sum((unaligned_uint16_t *)ip_hdr,
+		ip_hdr->hdr_checksum	= ip_sum((const alias_int16_t *)ip_hdr,
 						 sizeof(*ip_hdr));
 
 		/* Initialize UDP header. */
-		udp_hdr = (struct udp_hdr *)(ip_hdr + 1);
+		udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
 		udp_hdr->src_port	= rte_cpu_to_be_16(cfg_udp_src);
 		udp_hdr->dst_port	= rte_cpu_to_be_16(cfg_udp_dst);
 		udp_hdr->dgram_cksum	= 0; /* No UDP checksum. */
@@ -202,11 +166,12 @@ pkt_burst_flow_gen(struct fwd_stream *fs)
 							   sizeof(*ip_hdr));
 		pkt->nb_segs		= 1;
 		pkt->pkt_len		= pkt_size;
-		pkt->ol_flags		= ol_flags;
+		pkt->ol_flags		&= EXT_ATTACHED_MBUF;
+		pkt->ol_flags		|= ol_flags;
 		pkt->vlan_tci		= vlan_tci;
 		pkt->vlan_tci_outer	= vlan_tci_outer;
-		pkt->l2_len		= sizeof(struct ether_hdr);
-		pkt->l3_len		= sizeof(struct ipv4_hdr);
+		pkt->l2_len		= sizeof(struct rte_ether_hdr);
+		pkt->l3_len		= sizeof(struct rte_ipv4_hdr);
 		pkts_burst[nb_pkt]	= pkt;
 
 		next_flow = (next_flow + 1) % cfg_n_flows;
@@ -216,19 +181,17 @@ pkt_burst_flow_gen(struct fwd_stream *fs)
 	/*
 	 * Retry if necessary
 	 */
-	if (unlikely(nb_tx < nb_rx) && fs->retry_enabled) {
+	if (unlikely(nb_tx < nb_pkt) && fs->retry_enabled) {
 		retry = 0;
-		while (nb_tx < nb_rx && retry++ < burst_tx_retry_num) {
+		while (nb_tx < nb_pkt && retry++ < burst_tx_retry_num) {
 			rte_delay_us(burst_tx_delay_time);
 			nb_tx += rte_eth_tx_burst(fs->tx_port, fs->tx_queue,
-					&pkts_burst[nb_tx], nb_rx - nb_tx);
+					&pkts_burst[nb_tx], nb_pkt - nb_tx);
 		}
 	}
 	fs->tx_packets += nb_tx;
 
-#ifdef RTE_TEST_PMD_RECORD_BURST_STATS
-	fs->tx_burst_stats.pkt_burst_spread[nb_tx]++;
-#endif
+	inc_tx_burst_stats(fs, nb_tx);
 	if (unlikely(nb_tx < nb_pkt)) {
 		/* Back out the flow counter. */
 		next_flow -= (nb_pkt - nb_tx);
@@ -239,16 +202,26 @@ pkt_burst_flow_gen(struct fwd_stream *fs)
 			rte_pktmbuf_free(pkts_burst[nb_tx]);
 		} while (++nb_tx < nb_pkt);
 	}
-#ifdef RTE_TEST_PMD_RECORD_CORE_CYCLES
-	end_tsc = rte_rdtsc();
-	core_cycles = (end_tsc - start_tsc);
-	fs->core_cycles = (uint64_t) (fs->core_cycles + core_cycles);
-#endif
+
+	get_end_cycles(fs, start_tsc);
+}
+
+static void
+flowgen_stream_init(struct fwd_stream *fs)
+{
+	bool rx_stopped, tx_stopped;
+
+	rx_stopped = ports[fs->rx_port].rxq[fs->rx_queue].state ==
+						RTE_ETH_QUEUE_STATE_STOPPED;
+	tx_stopped = ports[fs->tx_port].txq[fs->tx_queue].state ==
+						RTE_ETH_QUEUE_STATE_STOPPED;
+	fs->disabled = rx_stopped || tx_stopped;
 }
 
 struct fwd_engine flow_gen_engine = {
 	.fwd_mode_name  = "flowgen",
 	.port_fwd_begin = NULL,
 	.port_fwd_end   = NULL,
+	.stream_init    = flowgen_stream_init,
 	.packet_fwd     = pkt_burst_flow_gen,
 };

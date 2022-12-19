@@ -13,38 +13,17 @@ It is intended as a demonstration of the basic components RTE flow rules.
 Compiling the Application
 -------------------------
 
-To compile the application export the path to the DPDK source tree and go to
-the example directory:
-
-.. code-block:: console
-
-    export RTE_SDK=/path/to/rte_sdk
-
-    cd ${RTE_SDK}/examples/flow_filtering
-
-Set the target, for example:
-
-.. code-block:: console
-
-    export RTE_TARGET=x86_64-native-linuxapp-gcc
-
-See the *DPDK Getting Started* Guide for possible ``RTE_TARGET`` values.
-
-Build the application as follows:
-
-.. code-block:: console
-
-    make
+To compile the sample application see :doc:`compiling`.
 
 
 Running the Application
 -----------------------
 
-To run the example in a ``linuxapp`` environment:
+To run the example in a ``linux`` environment:
 
 .. code-block:: console
 
-    ./build/flow -l 1 -n 1
+    ./<build_dir>/examples/dpdk-flow_filtering -l 1 -n 1
 
 Refer to *DPDK Getting Started Guide* for general information on running
 applications and the Environment Abstraction Layer (EAL) options.
@@ -193,7 +172,13 @@ application is shown below:
                    }
           }
 
-           rte_eth_promiscuous_enable(port_id);
+           ret = rte_eth_promiscuous_enable(port_id);
+           if (ret != 0) {
+                   rte_exit(EXIT_FAILURE,
+                           ":: cannot enable promiscuous mode: err=%d, port=%u\n",
+                           ret, port_id);
+           }
+
            ret = rte_eth_dev_start(port_id);
            if (ret < 0) {
                    rte_exit(EXIT_FAILURE,
@@ -278,7 +263,12 @@ We are setting the RX port to promiscuous mode:
 
 .. code-block:: c
 
-   rte_eth_promiscuous_enable(port_id);
+   ret = rte_eth_promiscuous_enable(port_id);
+   if (ret != 0) {
+        rte_exit(EXIT_FAILURE,
+                 ":: cannot enable promiscuous mode: err=%d, port=%u\n",
+                 ret, port_id);
+   }
 
 The last step is to start the port.
 
@@ -304,7 +294,7 @@ looks like the following:
    main_loop(void)
    {
            struct rte_mbuf *mbufs[32];
-           struct ether_hdr *eth_hdr;
+           struct rte_ether_hdr *eth_hdr;
            uint16_t nb_rx;
            uint16_t i;
            uint16_t j;
@@ -318,7 +308,7 @@ looks like the following:
                                            struct rte_mbuf *m = mbufs[j];
 
                                            eth_hdr = rte_pktmbuf_mtod(m,
-                                                        struct ether_hdr *);
+                                                        struct rte_ether_hdr *);
                                            print_ether_addr("src=",
                                                         &eth_hdr->s_addr);
                                            print_ether_addr(" - dst=",
@@ -348,7 +338,7 @@ queues and printing for each packet the destination queue:
                 if (nb_rx) {
                         for (j = 0; j < nb_rx; j++) {
                              struct rte_mbuf *m = mbufs[j];
-                             eth_hdr = rte_pktmbuf_mtod(m, struct ether_hdr *);
+                             eth_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
                              print_ether_addr("src=", &eth_hdr->s_addr);
                              print_ether_addr(" - dst=", &eth_hdr->d_addr);
                              printf(" - queue=0x%x", (unsigned int)i);
@@ -373,7 +363,7 @@ This function is located in the ``flow_blocks.c`` file.
 .. code-block:: c
 
    static struct rte_flow *
-   generate_ipv4_flow(uint8_t port_id, uint16_t rx_q,
+   generate_ipv4_flow(uint16_t port_id, uint16_t rx_q,
                    uint32_t src_ip, uint32_t src_mask,
                    uint32_t dest_ip, uint32_t dest_mask,
                    struct rte_flow_error *error)
@@ -502,4 +492,3 @@ The last part of the function is to validate the rule and create it.
    int res = rte_flow_validate(port_id, &attr, pattern, action, &error);
    if (!res)
         flow = rte_flow_create(port_id, &attr, pattern, action, &error);
-

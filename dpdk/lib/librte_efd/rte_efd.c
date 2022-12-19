@@ -9,6 +9,7 @@
 #include <stdarg.h>
 #include <sys/queue.h>
 
+#include <rte_string_fns.h>
 #include <rte_log.h>
 #include <rte_eal_memconfig.h>
 #include <rte_errno.h>
@@ -19,6 +20,8 @@
 #include <rte_ring.h>
 #include <rte_jhash.h>
 #include <rte_hash_crc.h>
+#include <rte_tailq.h>
+#include <rte_vect.h>
 
 #include "rte_efd.h"
 #if defined(RTE_ARCH_X86)
@@ -179,7 +182,7 @@ struct efd_offline_group_rules {
 	/**< Array with all values of the keys of the group. */
 
 	uint8_t bin_id[EFD_MAX_GROUP_NUM_RULES];
-	/**< Stores the bin for each correspending key to
+	/**< Stores the bin for each corresponding key to
 	 * avoid having to recompute it
 	 */
 };
@@ -205,7 +208,7 @@ struct efd_offline_chunk_rules {
 struct efd_online_group_entry {
 	efd_hashfunc_t hash_idx[RTE_EFD_VALUE_NUM_BITS];
 	efd_lookuptbl_t lookup_table[RTE_EFD_VALUE_NUM_BITS];
-} __attribute__((__packed__));
+} __rte_packed;
 
 /**
  * A single chunk record, containing EFD_TARGET_CHUNK_NUM_RULES rules.
@@ -221,7 +224,7 @@ struct efd_online_chunk {
 
 	struct efd_online_group_entry groups[EFD_CHUNK_NUM_GROUPS];
 	/**< Array of all the groups in the chunk. */
-} __attribute__((__packed__));
+} __rte_packed;
 
 /**
  * EFD table structure
@@ -531,7 +534,7 @@ rte_efd_create(const char *name, uint32_t max_num_rules, uint32_t key_len,
 
 	num_chunks_shift = rte_bsf32(num_chunks);
 
-	rte_rwlock_write_lock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_write_lock();
 
 	/*
 	 * Guarantee there's no existing: this is normally already checked
@@ -591,7 +594,7 @@ rte_efd_create(const char *name, uint32_t max_num_rules, uint32_t key_len,
 		goto error_unlock_exit;
 	}
 	table->keys = key_array;
-	snprintf(table->name, sizeof(table->name), "%s", name);
+	strlcpy(table->name, name, sizeof(table->name));
 
 	RTE_LOG(DEBUG, EFD, "Creating an EFD table with %u chunks,"
 			" which potentially supports %u entries\n",
@@ -643,7 +646,9 @@ rte_efd_create(const char *name, uint32_t max_num_rules, uint32_t key_len,
 	 * For less than 4 bits, scalar function performs better
 	 * than vectorised version
 	 */
-	if (RTE_EFD_VALUE_NUM_BITS > 3 && rte_cpu_get_flag_enabled(RTE_CPUFLAG_AVX2))
+	if (RTE_EFD_VALUE_NUM_BITS > 3
+			&& rte_cpu_get_flag_enabled(RTE_CPUFLAG_AVX2)
+			&& rte_vect_get_max_simd_bitwidth() >= RTE_VECT_SIMD_256)
 		table->lookup_fn = EFD_LOOKUP_AVX2;
 	else
 #endif
@@ -653,7 +658,8 @@ rte_efd_create(const char *name, uint32_t max_num_rules, uint32_t key_len,
 	 * than vectorised version
 	 */
 	if (RTE_EFD_VALUE_NUM_BITS > 16 &&
-	    rte_cpu_get_flag_enabled(RTE_CPUFLAG_NEON))
+	    rte_cpu_get_flag_enabled(RTE_CPUFLAG_NEON) &&
+			rte_vect_get_max_simd_bitwidth() >= RTE_VECT_SIMD_128)
 		table->lookup_fn = EFD_LOOKUP_NEON;
 	else
 #endif
@@ -684,7 +690,7 @@ rte_efd_create(const char *name, uint32_t max_num_rules, uint32_t key_len,
 
 	te->data = (void *) table;
 	TAILQ_INSERT_TAIL(efd_list, te, next);
-	rte_rwlock_write_unlock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_write_unlock();
 
 	snprintf(ring_name, sizeof(ring_name), "HT_%s", table->name);
 	/* Create ring (Dummy slot index is not enqueued) */
@@ -704,7 +710,8 @@ rte_efd_create(const char *name, uint32_t max_num_rules, uint32_t key_len,
 	return table;
 
 error_unlock_exit:
-	rte_rwlock_write_unlock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_write_unlock();
+	rte_free(te);
 	rte_efd_free(table);
 
 	return NULL;
@@ -719,7 +726,7 @@ rte_efd_find_existing(const char *name)
 
 	efd_list = RTE_TAILQ_CAST(rte_efd_tailq.head, rte_efd_list);
 
-	rte_rwlock_read_lock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_read_lock();
 
 	TAILQ_FOREACH(te, efd_list, next)
 	{
@@ -727,7 +734,7 @@ rte_efd_find_existing(const char *name)
 		if (strncmp(name, table->name, RTE_EFD_NAMESIZE) == 0)
 			break;
 	}
-	rte_rwlock_read_unlock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_read_unlock();
 
 	if (te == NULL) {
 		rte_errno = ENOENT;
@@ -750,7 +757,7 @@ rte_efd_free(struct rte_efd_table *table)
 		rte_free(table->chunks[socket_id]);
 
 	efd_list = RTE_TAILQ_CAST(rte_efd_tailq.head, rte_efd_list);
-	rte_rwlock_write_lock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_write_lock();
 
 	TAILQ_FOREACH_SAFE(te, efd_list, next, temp) {
 		if (te->data == (void *) table) {
@@ -760,7 +767,7 @@ rte_efd_free(struct rte_efd_table *table)
 		}
 	}
 
-	rte_rwlock_write_unlock(RTE_EAL_TAILQ_RWLOCK);
+	rte_mcfg_tailq_write_unlock();
 	rte_ring_free(table->free_slots);
 	rte_free(table->offline_chunks);
 	rte_free(table->keys);
@@ -1158,7 +1165,7 @@ rte_efd_update(struct rte_efd_table * const table, const unsigned int socket_id,
 {
 	uint32_t chunk_id = 0, group_id = 0, bin_id = 0;
 	uint8_t new_bin_choice = 0;
-	struct efd_online_group_entry entry;
+	struct efd_online_group_entry entry = {{0}};
 
 	int status = efd_compute_update(table, socket_id, key, value,
 			&chunk_id, &group_id, &bin_id,

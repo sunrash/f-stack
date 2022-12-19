@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause
  *
  *   Copyright (c) 2016 Freescale Semiconductor, Inc. All rights reserved.
- *   Copyright 2016 NXP
+ *   Copyright 2016-2019 NXP
  *
  */
 
@@ -9,8 +9,6 @@
 #define _DPAA2_HW_DPBP_H_
 
 #define DPAA2_MAX_BUF_POOLS	8
-
-#define DPAA2_INVALID_MBUF_SEQN	0
 
 struct buf_pool_cfg {
 	void *addr;
@@ -59,8 +57,9 @@ struct dpaa2_bp_info {
 #define mempool_to_bpinfo(mp) ((struct dpaa2_bp_info *)(mp)->pool_data)
 #define mempool_to_bpid(mp) ((mempool_to_bpinfo(mp))->bpid)
 
-extern struct dpaa2_bp_info rte_dpaa2_bpid_info[MAX_BPID];
+extern struct dpaa2_bp_info *rte_dpaa2_bpid_info;
 
+__rte_internal
 int rte_dpaa2_mbuf_alloc_bulk(struct rte_mempool *pool,
 		       void **obj_table, unsigned int count);
 

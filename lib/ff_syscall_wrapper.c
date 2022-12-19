@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2010 Kip Macy. All rights reserved.
- * Copyright (C) 2017 THL A29 Limited, a Tencent company.
+ * Copyright (C) 2017-2021 THL A29 Limited, a Tencent company.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -51,6 +51,7 @@
 #include <sys/sysproto.h>
 #include <sys/fcntl.h>
 #include <net/route.h>
+#include <net/route/route_ctl.h>
 
 #include <net/if.h>
 #include <sys/sockio.h>
@@ -87,12 +88,18 @@
 #define LINUX_IP_TTL        2
 #define LINUX_IP_HDRINCL    3
 #define LINUX_IP_OPTIONS    4
+#define LINUX_IP_RECVTTL    12
+#define LINUX_IP_RECVTOS    13
+#define LINUX_IP_MINTTL     21
 
 #define LINUX_IP_MULTICAST_IF       32
 #define LINUX_IP_MULTICAST_TTL      33
 #define LINUX_IP_MULTICAST_LOOP     34
 #define LINUX_IP_ADD_MEMBERSHIP     35
 #define LINUX_IP_DROP_MEMBERSHIP    36
+
+#define LINUX_IPV6_V6ONLY           26
+#define LINUX_IPV6_RECVPKTINFO      49
 
 #define LINUX_TCP_NODELAY     1
 #define LINUX_TCP_MAXSEG      2
@@ -168,6 +175,46 @@
 
 /* ioctl define end */
 
+/* af define start */
+
+#define LINUX_AF_INET6        10
+
+/* af define end */
+
+/* msghdr define start */
+
+struct linux_msghdr {
+    void *msg_name;             /* Address to send to/receive from.  */
+    socklen_t msg_namelen;      /* Length of address data.  */
+
+    struct iovec *msg_iov;      /* Vector of data to send/receive into.  */
+    size_t msg_iovlen;          /* Number of elements in the vector.  */
+
+    void *msg_control;          /* Ancillary data (eg BSD filedesc passing). */
+    size_t msg_controllen;      /* Ancillary data buffer length.
+                                   !! The type should be socklen_t but the
+                                   definition of the kernel is incompatible
+                                   with this.  */
+
+    int msg_flags;              /* Flags on received message.  */
+};
+
+/* msghdr define end */
+
+/* cmsghdr define start */
+
+struct linux_cmsghdr
+{
+    size_t cmsg_len;		/* Length of data in cmsg_data plus length
+                    of cmsghdr structure.
+                    !! The type should be socklen_t but the
+                    definition of the kernel is incompatible
+                    with this.  */
+    int cmsg_level;		/* Originating protocol.  */
+    int cmsg_type;		/* Protocol specific type.  */
+};
+
+/* cmsghdr define end */
 
 extern int sendit(struct thread *td, int s, struct msghdr *mp, int flags);
 
@@ -353,8 +400,27 @@ ip_opt_convert(int optname)
             return IP_ADD_MEMBERSHIP;
         case LINUX_IP_DROP_MEMBERSHIP:
             return IP_DROP_MEMBERSHIP;
+        case LINUX_IP_RECVTTL:
+            return IP_RECVTTL;
+        case LINUX_IP_RECVTOS:
+            return IP_RECVTOS;
+        case LINUX_IP_MINTTL:
+            return IP_MINTTL;
         default:
-            return -1;
+            return optname;
+    }
+}
+
+static int
+ip6_opt_convert(int optname)
+{
+    switch(optname) {
+        case LINUX_IPV6_V6ONLY:
+            return IPV6_V6ONLY;
+        case LINUX_IPV6_RECVPKTINFO:
+            return IPV6_RECVPKTINFO;
+        default:
+            return optname;
     }
 }
 
@@ -382,6 +448,40 @@ tcp_opt_convert(int optname)
 }
 
 static int
+ip_opt_convert2linux(int optname)
+{
+    switch(optname) {
+        case IP_RECVTTL:
+            return LINUX_IP_TTL; // in linux kernel return IP_TTL not IP_RECVTTL
+        case IP_RECVTOS:
+            return LINUX_IP_TOS; // in linux kernel return IP_TOS not IP_RECVTOS
+        default:
+            return optname;
+    }
+}
+
+static void
+freebsd2linux_cmsghdr(struct linux_msghdr *linux_msg)
+{
+    struct cmsghdr *cmsg;
+    cmsg = CMSG_FIRSTHDR(linux_msg);
+    struct linux_cmsghdr *linux_cmsg = (struct linux_cmsghdr*)cmsg;
+
+    switch (cmsg->cmsg_level) {
+        case IPPROTO_IP:
+            linux_cmsg->cmsg_type = ip_opt_convert2linux(cmsg->cmsg_type);
+            break;
+        default:
+            linux_cmsg->cmsg_type = cmsg->cmsg_type;
+            break;
+    }
+
+    linux_cmsg->cmsg_level = cmsg->cmsg_level;
+    linux_cmsg->cmsg_len = cmsg->cmsg_len + sizeof(struct linux_cmsghdr) - sizeof(struct cmsghdr);
+
+}
+
+static int
 linux2freebsd_opt(int level, int optname)
 {
     switch(level) {
@@ -389,6 +489,8 @@ linux2freebsd_opt(int level, int optname)
             return so_opt_convert(optname);
         case IPPROTO_IP:
             return ip_opt_convert(optname);
+        case IPPROTO_IPV6:
+            return ip6_opt_convert(optname);
         case IPPROTO_TCP:
             return tcp_opt_convert(optname);
         default:
@@ -405,7 +507,7 @@ linux2freebsd_sockaddr(const struct linux_sockaddr *linux,
     }
 
     /* #linux and #freebsd may point to the same address */
-    freebsd->sa_family = linux->sa_family;
+    freebsd->sa_family = linux->sa_family == LINUX_AF_INET6 ? AF_INET6 : linux->sa_family;
     freebsd->sa_len = addrlen;
 
     bcopy(linux->sa_data, freebsd->sa_data, addrlen - sizeof(linux->sa_family));
@@ -419,7 +521,7 @@ freebsd2linux_sockaddr(struct linux_sockaddr *linux,
         return;
     }
 
-    linux->sa_family = freebsd->sa_family;
+    linux->sa_family = freebsd->sa_family == AF_INET6 ? LINUX_AF_INET6 : freebsd->sa_family;
 
     bcopy(freebsd->sa_data, linux->sa_data, freebsd->sa_len - sizeof(linux->sa_family));
 }
@@ -429,7 +531,7 @@ ff_socket(int domain, int type, int protocol)
 {
     int rc;
     struct socket_args sa;
-    sa.domain = domain;
+    sa.domain = domain == LINUX_AF_INET6 ? AF_INET6 : domain;
     sa.type = type;
     sa.protocol = protocol;
     if ((rc = sys_socket(curthread, &sa)))
@@ -579,7 +681,7 @@ ff_close(int fd)
 {
     int rc;
 
-    if ((rc = kern_close(curthread, fd))) 
+    if ((rc = kern_close(curthread, fd)))
         goto kern_fail;
 
     return (rc);
@@ -594,7 +696,7 @@ ff_read(int fd, void *buf, size_t nbytes)
     struct uio auio;
     struct iovec aiov;
     int rc;
-    
+
     if (nbytes > INT_MAX) {
         rc = EINVAL;
         goto kern_fail;
@@ -661,7 +763,7 @@ ff_write(int fd, const void *buf, size_t nbytes)
     if ((rc = kern_writev(curthread, fd, &auio)))
         goto kern_fail;
     rc = curthread->td_retval[0];
-    
+
     return (rc);
 kern_fail:
     ff_os_errno(rc);
@@ -684,7 +786,7 @@ ff_writev(int fd, const struct iovec *iov, int iovcnt)
     if ((rc = kern_writev(curthread, fd, &auio)))
         goto kern_fail;
     rc = curthread->td_retval[0];
-    
+
     return (rc);
 kern_fail:
     ff_os_errno(rc);
@@ -794,7 +896,7 @@ ff_recvfrom(int s, void *buf, size_t len, int flags,
     if (fromlen != NULL)
         *fromlen = msg.msg_namelen;
 
-    if (from)
+    if (from && msg.msg_namelen != 0)
         freebsd2linux_sockaddr(from, (struct sockaddr *)&bsdaddr);
 
     return (rc);
@@ -803,21 +905,31 @@ kern_fail:
     return (-1);
 }
 
+/*
+ * It is considered here that the upper 4 bytes of
+ * msg->iovlen and msg->msg_controllen in linux_msghdr are 0.
+ */
 ssize_t
 ff_recvmsg(int s, struct msghdr *msg, int flags)
 {
-    int rc, oldflags;
+    int rc;
+    struct linux_msghdr *linux_msg = (struct linux_msghdr *)msg;
 
-    oldflags = msg->msg_flags;
     msg->msg_flags = flags;
 
     if ((rc = kern_recvit(curthread, s, msg, UIO_SYSSPACE, NULL))) {
-        msg->msg_flags = oldflags;
+        msg->msg_flags = 0;
         goto kern_fail;
     }
     rc = curthread->td_retval[0];
 
-    freebsd2linux_sockaddr(msg->msg_name, msg->msg_name);
+    freebsd2linux_sockaddr(linux_msg->msg_name, msg->msg_name);
+    linux_msg->msg_flags = msg->msg_flags;
+    msg->msg_flags = 0;
+
+    if(msg->msg_control) {
+        freebsd2linux_cmsghdr(linux_msg);
+    }
 
     return (rc);
 kern_fail:
@@ -835,7 +947,7 @@ ff_fcntl(int fd, int cmd, ...)
     va_start(ap, cmd);
 
     argp = va_arg(ap, uintptr_t);
-    va_end(ap);    
+    va_end(ap);
 
     if ((rc = kern_fcntl(curthread, fd, cmd, argp)))
         goto kern_fail;
@@ -866,11 +978,11 @@ ff_accept(int s, struct linux_sockaddr * addr,
 
     if (addrlen)
         *addrlen = pf->sa_len;
-    
+
     if(pf != NULL)
         free(pf, M_SONAME);
     return (rc);
-    
+
 kern_fail:
     if(pf != NULL)
         free(pf, M_SONAME);
@@ -898,7 +1010,7 @@ kern_fail:
 int
 ff_bind(int s, const struct linux_sockaddr *addr, socklen_t addrlen)
 {
-    int rc;    
+    int rc;
     struct sockaddr_storage bsdaddr;
     linux2freebsd_sockaddr(addr, addrlen, (struct sockaddr *)&bsdaddr);
 
@@ -943,7 +1055,7 @@ ff_getpeername(int s, struct linux_sockaddr * name,
     if(pf != NULL)
         free(pf, M_SONAME);
     return (rc);
-    
+
 kern_fail:
     if(pf != NULL)
         free(pf, M_SONAME);
@@ -975,7 +1087,7 @@ kern_fail:
     return (-1);
 }
 
-int    
+int
 ff_shutdown(int s, int how)
 {
     int rc;
@@ -1000,7 +1112,7 @@ ff_sysctl(const int *name, u_int namelen, void *oldp, size_t *oldlenp,
     int rc;
     size_t retval;
 
-    rc = userland_sysctl(curthread, __DECONST(int *, name), namelen, oldp, oldlenp, 
+    rc = userland_sysctl(curthread, __DECONST(int *, name), namelen, oldp, oldlenp,
         1, __DECONST(void *, newp), newlen, &retval, 0);
     if (rc)
         goto kern_fail;
@@ -1112,8 +1224,8 @@ kevent_copyin(void *arg, struct kevent *kevp, int count)
 }
 
 int
-ff_kevent_do_each(int kq, const struct kevent *changelist, int nchanges, 
-    void *eventlist, int nevents, const struct timespec *timeout, 
+ff_kevent_do_each(int kq, const struct kevent *changelist, int nchanges,
+    void *eventlist, int nevents, const struct timespec *timeout,
     void (*do_each)(void **, struct kevent *))
 {
     int rc;
@@ -1137,7 +1249,7 @@ ff_kevent_do_each(int kq, const struct kevent *changelist, int nchanges,
         kevent_copyin
     };
 
-    if ((rc = kern_kevent(curthread, kq, nchanges, nevents, &k_ops, 
+    if ((rc = kern_kevent(curthread, kq, nchanges, nevents, &k_ops,
             &ts)))
         goto kern_fail;
 
@@ -1149,7 +1261,7 @@ kern_fail:
 }
 
 int
-ff_kevent(int kq, const struct kevent *changelist, int nchanges, 
+ff_kevent(int kq, const struct kevent *changelist, int nchanges,
     struct kevent *eventlist, int nevents, const struct timespec *timeout)
 {
     return ff_kevent_do_each(kq, changelist, nchanges, eventlist, nevents, timeout, NULL);
@@ -1211,6 +1323,8 @@ ff_route_ctl(enum FF_ROUTE_CTL req, enum FF_ROUTE_FLAG flag,
     struct sockaddr *psa_gw, *psa_dst, *psa_nm;
     int rtreq, rtflag;
     int rc;
+    struct rt_addrinfo info;
+    struct rib_cmd_info rci;
 
     switch (req) {
         case FF_ROUTE_ADD:
@@ -1239,9 +1353,13 @@ ff_route_ctl(enum FF_ROUTE_CTL req, enum FF_ROUTE_FLAG flag,
             goto kern_fail;
     };
 
+    bzero((caddr_t)&info, sizeof(info));
+    info.rti_flags = rtflag;
+
     if (gw != NULL) {
         psa_gw = (struct sockaddr *)&sa_gw;
         linux2freebsd_sockaddr(gw, sizeof(*gw), psa_gw);
+        info.rti_info[RTAX_GATEWAY] = psa_gw;
     } else {
         psa_gw = NULL;
     }
@@ -1249,6 +1367,7 @@ ff_route_ctl(enum FF_ROUTE_CTL req, enum FF_ROUTE_FLAG flag,
     if (dst != NULL) {
         psa_dst = (struct sockaddr *)&sa_dst;
         linux2freebsd_sockaddr(dst, sizeof(*dst), psa_dst);
+        info.rti_info[RTAX_DST] = psa_dst;
     } else {
         psa_dst = NULL;
     }
@@ -1256,12 +1375,12 @@ ff_route_ctl(enum FF_ROUTE_CTL req, enum FF_ROUTE_FLAG flag,
     if (netmask != NULL) {
         psa_nm = (struct sockaddr *)&sa_nm;
         linux2freebsd_sockaddr(netmask, sizeof(*netmask), psa_nm);
+        info.rti_info[RTAX_NETMASK] = psa_nm;
     } else {
         psa_nm = NULL;
     }
 
-    rc = rtrequest_fib(rtreq, psa_dst, psa_gw, psa_nm, rtflag,
-        NULL, RT_DEFAULT_FIB);
+    rc = rib_action(RT_DEFAULT_FIB, rtreq, &info, &rci);
 
     if (rc != 0)
         goto kern_fail;

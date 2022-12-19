@@ -12,13 +12,22 @@ SRCS-y += esp.c
 SRCS-y += sp4.c
 SRCS-y += sp6.c
 SRCS-y += sa.c
+SRCS-y += sad.c
 SRCS-y += rt.c
+SRCS-y += ipsec_process.c
 SRCS-y += ipsec-secgw.c
+SRCS-y += ipsec_worker.c
+SRCS-y += event_helper.c
+SRCS-y += flow.c
 
 CFLAGS += -gdwarf-2
 
+PKGCONF ?= pkg-config
+
 # Build using pkg-config variables if possible
-ifeq ($(shell pkg-config --exists libdpdk && echo 0),0)
+ifneq ($(shell $(PKGCONF) --exists libdpdk && echo 0),0)
+$(error "no installation of DPDK found")
+endif
 
 all: shared
 .PHONY: shared static
@@ -27,12 +36,13 @@ shared: build/$(APP)-shared
 static: build/$(APP)-static
 	ln -sf $(APP)-static build/$(APP)
 
-PC_FILE := $(shell pkg-config --path libdpdk)
-CFLAGS += -O3 $(shell pkg-config --cflags libdpdk)
-LDFLAGS_SHARED = $(shell pkg-config --libs libdpdk)
-LDFLAGS_STATIC = -Wl,-Bstatic $(shell pkg-config --static --libs libdpdk)
+PC_FILE := $(shell $(PKGCONF) --path libdpdk 2>/dev/null)
+CFLAGS += -O3 $(shell $(PKGCONF) --cflags libdpdk)
+LDFLAGS_SHARED = $(shell $(PKGCONF) --libs libdpdk)
+LDFLAGS_STATIC = $(shell $(PKGCONF) --static --libs libdpdk)
 
 CFLAGS += -DALLOW_EXPERIMENTAL_API
+CFLAGS += -Wno-address-of-packed-member
 
 build/$(APP)-shared: $(SRCS-y) Makefile $(PC_FILE) | build
 	$(CC) $(CFLAGS) $(SRCS-y) -o $@ $(LDFLAGS) $(LDFLAGS_SHARED)
@@ -47,35 +57,3 @@ build:
 clean:
 	rm -f build/$(APP) build/$(APP)-static build/$(APP)-shared
 	test -d build && rmdir -p build || true
-
-else
-
-ifeq ($(RTE_SDK),)
-$(error "Please define RTE_SDK environment variable")
-endif
-
-# Default target, can be overridden by command line or environment
-RTE_TARGET ?= x86_64-native-linuxapp-gcc
-
-include $(RTE_SDK)/mk/rte.vars.mk
-
-ifneq ($(MAKECMDGOALS),clean)
-ifneq ($(CONFIG_RTE_LIBRTE_SECURITY),y)
-$(error "RTE_LIBRTE_SECURITY is required to build ipsec-secgw")
-endif
-endif
-
-CFLAGS += -DALLOW_EXPERIMENTAL_API
-CFLAGS += -O3 -gdwarf-2
-CFLAGS += $(WERROR_FLAGS)
-ifeq ($(CONFIG_RTE_TOOLCHAIN_ICC),y)
-CFLAGS_sa.o += -diag-disable=vec
-endif
-
-ifeq ($(DEBUG),1)
-CFLAGS += -DIPSEC_DEBUG -fstack-protector-all -O0
-endif
-
-include $(RTE_SDK)/mk/rte.extapp.mk
-
-endif

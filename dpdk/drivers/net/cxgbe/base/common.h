@@ -6,15 +6,11 @@
 #ifndef __CHELSIO_COMMON_H
 #define __CHELSIO_COMMON_H
 
-#include "cxgbe_compat.h"
+#include "../cxgbe_compat.h"
 #include "t4_hw.h"
 #include "t4vf_hw.h"
 #include "t4_chip_type.h"
 #include "t4fw_interface.h"
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 #define CXGBE_PAGE_SIZE RTE_PGSIZE_4K
 
@@ -133,6 +129,7 @@ struct tp_params {
 	unsigned short tx_modq[NCHAN];  /* channel to modulation queue map */
 
 	u32 vlan_pri_map;               /* cached TP_VLAN_PRI_MAP */
+	u32 filter_mask;
 	u32 ingress_config;             /* cached TP_INGRESS_CONFIG */
 
 	/* cached TP_OUT_CONFIG compressed error vector
@@ -158,6 +155,7 @@ struct tp_params {
 	int protocol_shift;
 	int ethertype_shift;
 	int macmatch_shift;
+	int tos_shift;
 
 	u64 hash_filter_mask;
 };
@@ -185,6 +183,7 @@ struct devlog_params {
 
 struct arch_specific_params {
 	u8 nchan;
+	u8 cng_ch_bits_log;             /* congestion channel map bits width */
 	u16 mps_rplc_size;
 	u16 vfcount;
 	u32 sge_fl_db;
@@ -198,15 +197,15 @@ struct rss_params {
 	unsigned int mode;			/* RSS mode */
 	union {
 		struct {
-			uint synmapen:1;	/* SYN Map Enable */
-			uint syn4tupenipv6:1;	/* en 4-tuple IPv6 SYNs hash */
-			uint syn2tupenipv6:1;	/* en 2-tuple IPv6 SYNs hash */
-			uint syn4tupenipv4:1;	/* en 4-tuple IPv4 SYNs hash */
-			uint syn2tupenipv4:1;	/* en 2-tuple IPv4 SYNs hash */
-			uint ofdmapen:1;	/* Offload Map Enable */
-			uint tnlmapen:1;	/* Tunnel Map Enable */
-			uint tnlalllookup:1;	/* Tunnel All Lookup */
-			uint hashtoeplitz:1;	/* use Toeplitz hash */
+			unsigned int synmapen:1;      /* SYN Map Enable */
+			unsigned int syn4tupenipv6:1; /* en 4-tuple IPv6 SYNs hash */
+			unsigned int syn2tupenipv6:1; /* en 2-tuple IPv6 SYNs hash */
+			unsigned int syn4tupenipv4:1; /* en 4-tuple IPv4 SYNs hash */
+			unsigned int syn2tupenipv4:1; /* en 2-tuple IPv4 SYNs hash */
+			unsigned int ofdmapen:1;      /* Offload Map Enable */
+			unsigned int tnlmapen:1;      /* Tunnel Map Enable */
+			unsigned int tnlalllookup:1;  /* Tunnel All Lookup */
+			unsigned int hashtoeplitz:1;  /* use Toeplitz hash */
 		} basicvirtual;
 	} u;
 };
@@ -216,6 +215,7 @@ struct rss_params {
  */
 struct pf_resources {
 	unsigned int neq;      /* N egress Qs */
+	unsigned int nethctrl; /* N egress ETH or CTRL Qs */
 	unsigned int niqflint; /* N ingress Qs/w free list(s) & intr */
 };
 
@@ -272,6 +272,8 @@ struct adapter_params {
 	bool ulptx_memwrite_dsgl;          /* use of T5 DSGL allowed */
 	u8 fw_caps_support;		  /* 32-bit Port Capabilities */
 	u8 filter2_wr_support;            /* FW support for FILTER2_WR */
+	u32 viid_smt_extn_support:1;	  /* FW returns vin and smt index */
+	u32 max_tx_coalesce_num; /* Max # of Tx packets that can be coalesced */
 };
 
 /* Firmware Port Capabilities types.
@@ -380,10 +382,11 @@ int t4_set_params(struct adapter *adap, unsigned int mbox, unsigned int pf,
 int t4_alloc_vi_func(struct adapter *adap, unsigned int mbox,
 		     unsigned int port, unsigned int pf, unsigned int vf,
 		     unsigned int nmac, u8 *mac, unsigned int *rss_size,
-		     unsigned int portfunc, unsigned int idstype);
+		     unsigned int portfunc, unsigned int idstype,
+		     u8 *vivld, u8 *vin);
 int t4_alloc_vi(struct adapter *adap, unsigned int mbox, unsigned int port,
 		unsigned int pf, unsigned int vf, unsigned int nmac, u8 *mac,
-		unsigned int *rss_size);
+		unsigned int *rss_size, u8 *vivild, u8 *vin);
 int t4_free_vi(struct adapter *adap, unsigned int mbox,
 	       unsigned int pf, unsigned int vf,
 	       unsigned int viid);
@@ -522,7 +525,7 @@ void t4_read_rss_key(struct adapter *adap, u32 *key);
 
 enum t4_bar2_qtype { T4_BAR2_QTYPE_EGRESS, T4_BAR2_QTYPE_INGRESS };
 int t4_bar2_sge_qregs(struct adapter *adapter, unsigned int qid,
-		      unsigned int qtype, u64 *pbar2_qoffset,
+		      enum t4_bar2_qtype qtype, u64 *pbar2_qoffset,
 		      unsigned int *pbar2_qid);
 
 int t4_init_sge_params(struct adapter *adapter);

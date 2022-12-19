@@ -1,35 +1,6 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2010-2015 Intel Corporation. All rights reserved.
- *   Copyright(c) 2017 IBM Corporation.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010 - 2015 Intel Corporation
+ * Copyright(c) 2017 IBM Corporation.
  */
 
 #include <stdint.h>
@@ -42,7 +13,7 @@
 #include "i40e_rxtx.h"
 #include "i40e_rxtx_vec_common.h"
 
-#include <altivec.h>
+#include <rte_altivec.h>
 
 #pragma GCC diagnostic ignored "-Wcast-qual"
 
@@ -217,11 +188,13 @@ desc_to_ptype_v(vector unsigned long descs[4], struct rte_mbuf **rx_pkts,
 		ptype_tbl[(*(vector unsigned char *)&ptype1)[8]];
 }
 
- /* Notice:
-  * - nb_pkts < RTE_I40E_DESCS_PER_LOOP, just return no packet
-  * - nb_pkts > RTE_I40E_VPMD_RX_BURST, only scan RTE_I40E_VPMD_RX_BURST
-  *   numbers of DD bits
-  */
+/**
+ * vPMD raw receive routine, only accept(nb_pkts >= RTE_I40E_DESCS_PER_LOOP)
+ *
+ * Notice:
+ * - nb_pkts < RTE_I40E_DESCS_PER_LOOP, just return no packet
+ * - floor align nb_pkts to a RTE_I40E_DESCS_PER_LOOP power-of-two
+ */
 static inline uint16_t
 _recv_raw_pkts_vec(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
 		   uint16_t nb_pkts, uint8_t *split_packet)
@@ -242,9 +215,6 @@ _recv_raw_pkts_vec(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
 		0, 0, 0       /* ignore non-length fields */
 		};
 	vector unsigned long dd_check, eop_check;
-
-	/* nb_pkts shall be less equal than RTE_I40E_MAX_RX_BURST */
-	nb_pkts = RTE_MIN(nb_pkts, RTE_I40E_MAX_RX_BURST);
 
 	/* nb_pkts has to be floor-aligned to RTE_I40E_DESCS_PER_LOOP */
 	nb_pkts = RTE_ALIGN_FLOOR(nb_pkts, RTE_I40E_DESCS_PER_LOOP);
@@ -311,22 +281,22 @@ _recv_raw_pkts_vec(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
 						  * in one XMM reg.
 						  */
 
-		/* B.1 load 1 mbuf point */
+		/* B.1 load 2 mbuf point */
 		mbp1 = *(vector unsigned long *)&sw_ring[pos];
 		/* Read desc statuses backwards to avoid race condition */
-		/* A.1 load 4 pkts desc */
+		/* A.1 load desc[3] */
 		descs[3] = *(vector unsigned long *)(rxdp + 3);
 		rte_compiler_barrier();
 
 		/* B.2 copy 2 mbuf point into rx_pkts  */
 		*(vector unsigned long *)&rx_pkts[pos] = mbp1;
 
-		/* B.1 load 1 mbuf point */
+		/* B.1 load 2 mbuf point */
 		mbp2 = *(vector unsigned long *)&sw_ring[pos + 2];
 
+		/* A.1 load desc[2-0] */
 		descs[2] = *(vector unsigned long *)(rxdp + 2);
 		rte_compiler_barrier();
-		/* B.1 load 2 mbuf point */
 		descs[1] = *(vector unsigned long *)(rxdp + 1);
 		rte_compiler_barrier();
 		descs[0] = *(vector unsigned long *)(rxdp);
@@ -428,7 +398,7 @@ _recv_raw_pkts_vec(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
 				(vector unsigned char)vec_nor(staterr, staterr),
 				(vector unsigned char)eop_check);
 			/* the staterr values are not in order, as the count
-			 * count of dd bits doesn't care. However, for end of
+			 * of dd bits doesn't care. However, for end of
 			 * packet tracking, we do care, so shuffle. This also
 			 * compresses the 32-bit values to 8-bit
 			 */
@@ -460,7 +430,7 @@ _recv_raw_pkts_vec(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
 		desc_to_ptype_v(descs, &rx_pkts[pos], ptype_tbl);
 		desc_to_olflags_v(descs, &rx_pkts[pos]);
 
-		/* C.4 calc avaialbe number of desc */
+		/* C.4 calc available number of desc */
 		var = __builtin_popcountll((vec_ld(0,
 			(vector unsigned long *)&staterr)[0]));
 		nb_pkts_recd += var;
@@ -488,15 +458,15 @@ i40e_recv_pkts_vec(void *rx_queue, struct rte_mbuf **rx_pkts,
 	return _recv_raw_pkts_vec(rx_queue, rx_pkts, nb_pkts, NULL);
 }
 
- /* vPMD receive routine that reassembles scattered packets
-  * Notice:
-  * - nb_pkts < RTE_I40E_DESCS_PER_LOOP, just return no packet
-  * - nb_pkts > RTE_I40E_VPMD_RX_BURST, only scan RTE_I40E_VPMD_RX_BURST
-  *   numbers of DD bits
-  */
-uint16_t
-i40e_recv_scattered_pkts_vec(void *rx_queue, struct rte_mbuf **rx_pkts,
-			     uint16_t nb_pkts)
+/**
+ * vPMD receive routine that reassembles single burst of 32 scattered packets
+ *
+ * Notice:
+ * - nb_pkts < RTE_I40E_DESCS_PER_LOOP, just return no packet
+ */
+static uint16_t
+i40e_recv_scattered_burst_vec(void *rx_queue, struct rte_mbuf **rx_pkts,
+			      uint16_t nb_pkts)
 {
 	struct i40e_rx_queue *rxq = rx_queue;
 	uint8_t split_flags[RTE_I40E_VPMD_RX_BURST] = {0};
@@ -527,6 +497,32 @@ i40e_recv_scattered_pkts_vec(void *rx_queue, struct rte_mbuf **rx_pkts,
 	}
 	return i + reassemble_packets(rxq, &rx_pkts[i], nb_bufs - i,
 		&split_flags[i]);
+}
+
+/**
+ * vPMD receive routine that reassembles scattered packets.
+ */
+uint16_t
+i40e_recv_scattered_pkts_vec(void *rx_queue, struct rte_mbuf **rx_pkts,
+			     uint16_t nb_pkts)
+{
+	uint16_t retval = 0;
+
+	while (nb_pkts > RTE_I40E_VPMD_RX_BURST) {
+		uint16_t burst;
+
+		burst = i40e_recv_scattered_burst_vec(rx_queue,
+						      rx_pkts + retval,
+						      RTE_I40E_VPMD_RX_BURST);
+		retval += burst;
+		nb_pkts -= burst;
+		if (burst < RTE_I40E_VPMD_RX_BURST)
+			return retval;
+	}
+
+	return retval + i40e_recv_scattered_burst_vec(rx_queue,
+						      rx_pkts + retval,
+						      nb_pkts);
 }
 
 static inline void
@@ -620,25 +616,25 @@ i40e_xmit_fixed_burst_vec(void *tx_queue, struct rte_mbuf **tx_pkts,
 	return nb_pkts;
 }
 
-void __attribute__((cold))
+void __rte_cold
 i40e_rx_queue_release_mbufs_vec(struct i40e_rx_queue *rxq)
 {
 	_i40e_rx_queue_release_mbufs_vec(rxq);
 }
 
-int __attribute__((cold))
+int __rte_cold
 i40e_rxq_vec_setup(struct i40e_rx_queue *rxq)
 {
 	return i40e_rxq_vec_setup_default(rxq);
 }
 
-int __attribute__((cold))
+int __rte_cold
 i40e_txq_vec_setup(struct i40e_tx_queue __rte_unused * txq)
 {
 	return 0;
 }
 
-int __attribute__((cold))
+int __rte_cold
 i40e_rx_vec_dev_conf_condition_check(struct rte_eth_dev *dev)
 {
 	return i40e_rx_vec_dev_conf_condition_check_default(dev);

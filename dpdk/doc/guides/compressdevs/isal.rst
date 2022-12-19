@@ -4,7 +4,7 @@
 ISA-L Compression Poll Mode Driver
 ==================================
 
-The ISA-L PMD (**librte_pmd_isal_comp**) provides poll mode compression &
+The ISA-L PMD (**librte_compress_isal**) provides poll mode compression &
 decompression driver support for utilizing Intel ISA-L library,
 which implements the deflate algorithm for both Deflate(compression) and Inflate(decompression).
 
@@ -26,6 +26,33 @@ Huffman code type:
 Window size support:
 
     * 32K
+
+Checksum:
+
+    * CRC32
+    * ADLER32
+
+To enable a checksum in the driver, the compression and/or decompression xform
+structure, rte_comp_xform, must be filled with either of the CompressDev
+checksum flags supported. ::
+
+ compress_xform->compress.chksum = RTE_COMP_CHECKSUM_CRC32
+
+ decompress_xform->decompress.chksum = RTE_COMP_CHECKSUM_CRC32
+
+::
+
+ compress_xform->compress.chksum = RTE_COMP_CHECKSUM_ADLER32
+
+ decompress_xform->decompress.chksum = RTE_COMP_CHECKSUM_ADLER32
+
+If you request a checksum for compression or decompression,
+the checksum field in the operation structure,  ``op->output_chksum``,
+will be filled with the checksum.
+
+.. Note::
+
+ For the compression case above, your output buffer will need to be large enough to hold the compressed data plus a scratchpad for the checksum at the end, the scratchpad is 8 bytes for CRC32 and 4 bytes for Adler32.
 
 Level guide:
 
@@ -75,12 +102,11 @@ As a result the level mappings from the API to the PMD are shown below.
  The above table only shows mapping when API calls for dynamic compression.
  For fixed compression, regardless of API level, internally ISA-L level 0 is always used.
 
+
 Limitations
 -----------
 
 * Compressdev level 0, no compression, is not supported.
-
-* Checksums will not be supported until future release.
 
 Installation
 ------------
@@ -106,10 +132,6 @@ Installation
 
 Initialization
 --------------
-
-In order to enable this virtual compression PMD, user must:
-
-* Set ``CONFIG_RTE_LIBRTE_PMD_ISAL=y`` in config/common_base.
 
 To use the PMD in an application, user must:
 

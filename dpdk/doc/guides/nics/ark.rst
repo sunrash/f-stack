@@ -1,33 +1,6 @@
-.. BSD LICENSE
-
+.. SPDX-License-Identifier: BSD-3-Clause
     Copyright (c) 2015-2017 Atomic Rules LLC
     All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-
-    * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-    * Neither the name of Atomic Rules LLC nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ARK Poll Mode Driver
 ====================
@@ -149,28 +122,12 @@ The driver supports single-port, multi-queue for both RX and TX.
 Configuration Information
 -------------------------
 
-**DPDK Configuration Parameters**
+**DPDK Configuration Parameter**
 
-  The following configuration options are available for the ARK PMD:
-
-   * **CONFIG_RTE_LIBRTE_ARK_PMD** (default y): Enables or disables inclusion
-     of the ARK PMD driver in the DPDK compilation.
-
-   * **CONFIG_RTE_LIBRTE_ARK_PAD_TX** (default y):  When enabled TX
-     packets are padded to 60 bytes to support downstream MACS.
-
-   * **CONFIG_RTE_LIBRTE_ARK_DEBUG_RX** (default n): Enables or disables debug
-     logging and internal checking of RX ingress logic within the ARK PMD driver.
-
-   * **CONFIG_RTE_LIBRTE_ARK_DEBUG_TX** (default n): Enables or disables debug
-     logging and internal checking of TX egress logic within the ARK PMD driver.
-
-   * **CONFIG_RTE_LIBRTE_ARK_DEBUG_STATS** (default n): Enables or disables debug
-     logging of detailed packet and performance statistics gathered in
-     the PMD and FPGA.
-
-   * **CONFIG_RTE_LIBRTE_ARK_DEBUG_TRACE** (default n): Enables or disables debug
-     logging of detailed PMD events and status.
+   * **RTE_LIBRTE_ARK_MIN_TX_PKTLEN** (default 0): Sets the minimum
+     packet length for tx packets to the FPGA.  Packets less than this
+     length are padded to meet the requirement. This allows padding to
+     be offloaded or remain in host software.
 
 
 Building DPDK
@@ -183,6 +140,13 @@ By default the ARK PMD library will be built into the DPDK library.
 
 For configuring and using UIO and VFIO frameworks, please also refer :ref:`the
 documentation that comes with DPDK suite <linux_gsg>`.
+
+To build with a non-zero minimum tx packet length, set the above macro in your
+CFLAGS environment prior to the meson build step. I.e.,
+
+    export CFLAGS="-DRTE_LIBRTE_ARK_MIN_TX_PKTLEN=60"
+    meson build
+
 
 Supported ARK RTL PCIe Instances
 --------------------------------
@@ -238,7 +202,7 @@ Usage Example
 
 Follow instructions available in the document
 :ref:`compiling and testing a PMD for a NIC <pmd_build_and_test>` to launch
-**testpmd** with Atomic Rules ARK devices managed by librte_pmd_ark.
+**testpmd** with Atomic Rules ARK devices managed by librte_net_ark.
 
 Example output:
 

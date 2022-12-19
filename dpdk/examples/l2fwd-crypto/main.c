@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <rte_string_fns.h>
 #include <rte_atomic.h>
 #include <rte_branch_prediction.h>
 #include <rte_common.h>
@@ -42,7 +43,7 @@
 #include <rte_prefetch.h>
 #include <rte_random.h>
 #include <rte_hexdump.h>
-#ifdef RTE_LIBRTE_PMD_CRYPTO_SCHEDULER
+#ifdef RTE_CRYPTO_SCHEDULER
 #include <rte_cryptodev_scheduler.h>
 #endif
 
@@ -78,7 +79,7 @@ static uint16_t nb_rxd = RTE_TEST_RX_DESC_DEFAULT;
 static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
 
 /* ethernet addresses of ports */
-static struct ether_addr l2fwd_ports_eth_addr[RTE_MAX_ETHPORTS];
+static struct rte_ether_addr l2fwd_ports_eth_addr[RTE_MAX_ETHPORTS];
 
 /* mask of enabled ports */
 static uint64_t l2fwd_enabled_port_mask;
@@ -135,6 +136,7 @@ struct l2fwd_crypto_options {
 	struct rte_crypto_sym_xform cipher_xform;
 	unsigned ckey_param;
 	int ckey_random_size;
+	uint8_t cipher_key[MAX_KEY_SIZE];
 
 	struct l2fwd_iv cipher_iv;
 	unsigned int cipher_iv_param;
@@ -143,6 +145,7 @@ struct l2fwd_crypto_options {
 	struct rte_crypto_sym_xform auth_xform;
 	uint8_t akey_param;
 	int akey_random_size;
+	uint8_t auth_key[MAX_KEY_SIZE];
 
 	struct l2fwd_iv auth_iv;
 	unsigned int auth_iv_param;
@@ -151,6 +154,7 @@ struct l2fwd_crypto_options {
 	struct rte_crypto_sym_xform aead_xform;
 	unsigned int aead_key_param;
 	int aead_key_random_size;
+	uint8_t aead_key[MAX_KEY_SIZE];
 
 	struct l2fwd_iv aead_iv;
 	unsigned int aead_iv_param;
@@ -211,7 +215,7 @@ struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
 		.mq_mode = ETH_MQ_RX_NONE,
-		.max_rx_pkt_len = ETHER_MAX_LEN,
+		.max_rx_pkt_len = RTE_ETHER_MAX_LEN,
 		.split_hdr_size = 0,
 	},
 	.txmode = {
@@ -221,7 +225,10 @@ static struct rte_eth_conf port_conf = {
 
 struct rte_mempool *l2fwd_pktmbuf_pool;
 struct rte_mempool *l2fwd_crypto_op_pool;
-struct rte_mempool *session_pool_socket[RTE_MAX_NUMA_NODES] = { 0 };
+static struct {
+	struct rte_mempool *sess_mp;
+	struct rte_mempool *priv_mp;
+} session_pool_socket[RTE_MAX_NUMA_NODES];
 
 /* Per-port statistics struct */
 struct l2fwd_port_statistics {
@@ -245,11 +252,9 @@ struct l2fwd_port_statistics port_statistics[RTE_MAX_ETHPORTS];
 struct l2fwd_crypto_statistics crypto_statistics[RTE_CRYPTO_MAX_DEVS];
 
 /* A tsc-based timer responsible for triggering statistics printout */
-#define TIMER_MILLISECOND 2000000ULL /* around 1ms at 2 Ghz */
+#define TIMER_MILLISECOND (rte_get_tsc_hz() / 1000)
 #define MAX_TIMER_PERIOD 86400UL /* 1 day max */
-
-/* default period is 10 seconds */
-static int64_t timer_period = 10 * TIMER_MILLISECOND * 1000;
+#define DEFAULT_TIMER_PERIOD 10UL
 
 /* Print out statistics on packets dropped */
 static void
@@ -327,6 +332,8 @@ print_stats(void)
 		   total_packets_dropped,
 		   total_packets_errors);
 	printf("\n====================================================\n");
+
+	fflush(stdout);
 }
 
 static int
@@ -383,25 +390,25 @@ l2fwd_simple_crypto_enqueue(struct rte_mbuf *m,
 		struct rte_crypto_op *op,
 		struct l2fwd_crypto_params *cparams)
 {
-	struct ether_hdr *eth_hdr;
-	struct ipv4_hdr *ip_hdr;
+	struct rte_ether_hdr *eth_hdr;
+	struct rte_ipv4_hdr *ip_hdr;
 
 	uint32_t ipdata_offset, data_len;
 	uint32_t pad_len = 0;
 	char *padding;
 
-	eth_hdr = rte_pktmbuf_mtod(m, struct ether_hdr *);
+	eth_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
-	if (eth_hdr->ether_type != rte_cpu_to_be_16(ETHER_TYPE_IPv4))
+	if (eth_hdr->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4))
 		return -1;
 
-	ipdata_offset = sizeof(struct ether_hdr);
+	ipdata_offset = sizeof(struct rte_ether_hdr);
 
-	ip_hdr = (struct ipv4_hdr *)(rte_pktmbuf_mtod(m, char *) +
+	ip_hdr = (struct rte_ipv4_hdr *)(rte_pktmbuf_mtod(m, char *) +
 			ipdata_offset);
 
-	ipdata_offset += (ip_hdr->version_ihl & IPV4_HDR_IHL_MASK)
-			* IPV4_IHL_MULTIPLIER;
+	ipdata_offset += (ip_hdr->version_ihl & RTE_IPV4_HDR_IHL_MASK)
+			* RTE_IPV4_IHL_MULTIPLIER;
 
 
 	/* Zero pad data to be crypto'd so it is block aligned */
@@ -589,17 +596,17 @@ l2fwd_send_packet(struct rte_mbuf *m, uint16_t port)
 static void
 l2fwd_mac_updating(struct rte_mbuf *m, uint16_t dest_portid)
 {
-	struct ether_hdr *eth;
+	struct rte_ether_hdr *eth;
 	void *tmp;
 
-	eth = rte_pktmbuf_mtod(m, struct ether_hdr *);
+	eth = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
 	/* 02:00:00:00:00:xx */
 	tmp = &eth->d_addr.addr_bytes[0];
 	*((uint64_t *)tmp) = 0x000000000002 + ((uint64_t)dest_portid << 40);
 
 	/* src addr */
-	ether_addr_copy(&l2fwd_ports_eth_addr[dest_portid], &eth->s_addr);
+	rte_ether_addr_copy(&l2fwd_ports_eth_addr[dest_portid], &eth->s_addr);
 }
 
 static void
@@ -607,11 +614,25 @@ l2fwd_simple_forward(struct rte_mbuf *m, uint16_t portid,
 		struct l2fwd_crypto_options *options)
 {
 	uint16_t dst_port;
+	uint32_t pad_len;
+	struct rte_ipv4_hdr *ip_hdr;
+	uint32_t ipdata_offset = sizeof(struct rte_ether_hdr);
 
+	ip_hdr = (struct rte_ipv4_hdr *)(rte_pktmbuf_mtod(m, char *) +
+					 ipdata_offset);
 	dst_port = l2fwd_dst_ports[portid];
 
 	if (options->mac_updating)
 		l2fwd_mac_updating(m, dst_port);
+
+	if (options->auth_xform.auth.op == RTE_CRYPTO_AUTH_OP_VERIFY)
+		rte_pktmbuf_trim(m, options->auth_xform.auth.digest_length);
+
+	if (options->cipher_xform.cipher.op == RTE_CRYPTO_CIPHER_OP_DECRYPT) {
+		pad_len = m->pkt_len - rte_be_to_cpu_16(ip_hdr->total_length) -
+			  ipdata_offset;
+		rte_pktmbuf_trim(m, pad_len);
+	}
 
 	l2fwd_send_packet(m, dst_port);
 }
@@ -645,7 +666,6 @@ initialize_crypto_session(struct l2fwd_crypto_options *options, uint8_t cdev_id)
 		return NULL;
 
 	uint8_t socket_id = (uint8_t) retval;
-	struct rte_mempool *sess_mp = session_pool_socket[socket_id];
 
 	if (options->xform_chain == L2FWD_CRYPTO_AEAD) {
 		first_xform = &options->aead_xform;
@@ -661,13 +681,14 @@ initialize_crypto_session(struct l2fwd_crypto_options *options, uint8_t cdev_id)
 		first_xform = &options->auth_xform;
 	}
 
-	session = rte_cryptodev_sym_session_create(sess_mp);
-
+	session = rte_cryptodev_sym_session_create(
+			session_pool_socket[socket_id].sess_mp);
 	if (session == NULL)
 		return NULL;
 
 	if (rte_cryptodev_sym_session_init(cdev_id, session,
-				first_xform, sess_mp) < 0)
+				first_xform,
+				session_pool_socket[socket_id].priv_mp) < 0)
 		return NULL;
 
 	return session;
@@ -856,18 +877,17 @@ l2fwd_main_loop(struct l2fwd_crypto_options *options)
 			}
 
 			/* if timer is enabled */
-			if (timer_period > 0) {
+			if (options->refresh_period > 0) {
 
 				/* advance the timer */
 				timer_tsc += diff_tsc;
 
 				/* if timer has reached its timeout */
 				if (unlikely(timer_tsc >=
-						(uint64_t)timer_period)) {
+						options->refresh_period)) {
 
-					/* do this only on master core */
-					if (lcore_id == rte_get_master_lcore()
-						&& options->refresh_period) {
+					/* do this only on main core */
+					if (lcore_id == rte_get_main_lcore()) {
 						print_stats();
 						timer_tsc = 0;
 					}
@@ -1196,8 +1216,7 @@ l2fwd_crypto_parse_args_long_options(struct l2fwd_crypto_options *options,
 	if (strcmp(lgopts[option_index].name, "cdev_type") == 0) {
 		retval = parse_cryptodev_type(&options->type, optarg);
 		if (retval == 0)
-			snprintf(options->string_type, MAX_STR_LEN,
-				"%s", optarg);
+			strlcpy(options->string_type, optarg, MAX_STR_LEN);
 		return retval;
 	}
 
@@ -1216,8 +1235,7 @@ l2fwd_crypto_parse_args_long_options(struct l2fwd_crypto_options *options,
 	else if (strcmp(lgopts[option_index].name, "cipher_key") == 0) {
 		options->ckey_param = 1;
 		options->cipher_xform.cipher.key.length =
-			parse_bytes(options->cipher_xform.cipher.key.data, optarg,
-					MAX_KEY_SIZE);
+			parse_bytes(options->cipher_key, optarg, MAX_KEY_SIZE);
 		if (options->cipher_xform.cipher.key.length > 0)
 			return 0;
 		else
@@ -1253,8 +1271,7 @@ l2fwd_crypto_parse_args_long_options(struct l2fwd_crypto_options *options,
 	else if (strcmp(lgopts[option_index].name, "auth_key") == 0) {
 		options->akey_param = 1;
 		options->auth_xform.auth.key.length =
-			parse_bytes(options->auth_xform.auth.key.data, optarg,
-					MAX_KEY_SIZE);
+			parse_bytes(options->auth_key, optarg, MAX_KEY_SIZE);
 		if (options->auth_xform.auth.key.length > 0)
 			return 0;
 		else
@@ -1291,8 +1308,7 @@ l2fwd_crypto_parse_args_long_options(struct l2fwd_crypto_options *options,
 	else if (strcmp(lgopts[option_index].name, "aead_key") == 0) {
 		options->aead_key_param = 1;
 		options->aead_xform.aead.key.length =
-			parse_bytes(options->aead_xform.aead.key.data, optarg,
-					MAX_KEY_SIZE);
+			parse_bytes(options->aead_key, optarg, MAX_KEY_SIZE);
 		if (options->aead_xform.aead.key.length > 0)
 			return 0;
 		else
@@ -1432,7 +1448,8 @@ l2fwd_crypto_default_options(struct l2fwd_crypto_options *options)
 {
 	options->portmask = 0xffffffff;
 	options->nb_ports_per_lcore = 1;
-	options->refresh_period = 10000;
+	options->refresh_period = DEFAULT_TIMER_PERIOD *
+					TIMER_MILLISECOND * 1000;
 	options->single_lcore = 0;
 	options->sessionless = 0;
 
@@ -1728,6 +1745,8 @@ check_all_ports_link_status(uint32_t port_mask)
 	uint16_t portid;
 	uint8_t count, all_ports_up, print_flag = 0;
 	struct rte_eth_link link;
+	int ret;
+	char link_status_text[RTE_ETH_LINK_MAX_STR_LEN];
 
 	printf("\nChecking link status");
 	fflush(stdout);
@@ -1737,17 +1756,20 @@ check_all_ports_link_status(uint32_t port_mask)
 			if ((port_mask & (1 << portid)) == 0)
 				continue;
 			memset(&link, 0, sizeof(link));
-			rte_eth_link_get_nowait(portid, &link);
+			ret = rte_eth_link_get_nowait(portid, &link);
+			if (ret < 0) {
+				all_ports_up = 0;
+				if (print_flag == 1)
+					printf("Port %u link get failed: %s\n",
+						portid, rte_strerror(-ret));
+				continue;
+			}
 			/* print link status if flag set */
 			if (print_flag == 1) {
-				if (link.link_status)
-					printf(
-					"Port%d Link Up. Speed %u Mbps - %s\n",
-						portid, link.link_speed,
-				(link.link_duplex == ETH_LINK_FULL_DUPLEX) ?
-					("full-duplex") : ("half-duplex\n"));
-				else
-					printf("Port %d Link Down\n", portid);
+				rte_eth_link_to_str(link_status_text,
+					sizeof(link_status_text), &link);
+				printf("Port %d %s\n", portid,
+					link_status_text);
 				continue;
 			}
 			/* clear all_ports_up flag if any link down */
@@ -2241,6 +2263,12 @@ initialize_cryptodevs(struct l2fwd_crypto_options *options, unsigned nb_ports,
 		if (enabled_cdevs[cdev_id] == 0)
 			continue;
 
+		if (check_cryptodev_mask(options, cdev_id) < 0)
+			continue;
+
+		if (check_capabilities(options, cdev_id) < 0)
+			continue;
+
 		retval = rte_cryptodev_socket_id(cdev_id);
 
 		if (retval < 0) {
@@ -2253,6 +2281,7 @@ initialize_cryptodevs(struct l2fwd_crypto_options *options, unsigned nb_ports,
 		struct rte_cryptodev_config conf = {
 			.nb_queue_pairs = 1,
 			.socket_id = socket_id,
+			.ff_disable = RTE_CRYPTODEV_FF_SECURITY,
 		};
 
 		rte_cryptodev_info_get(cdev_id, &dev_info);
@@ -2262,43 +2291,59 @@ initialize_cryptodevs(struct l2fwd_crypto_options *options, unsigned nb_ports,
 		 * (one for the header, one for the private data)
 		 */
 		if (!strcmp(dev_info.driver_name, "crypto_scheduler")) {
-#ifdef RTE_LIBRTE_PMD_CRYPTO_SCHEDULER
-			uint32_t nb_slaves =
-				rte_cryptodev_scheduler_slaves_get(cdev_id,
+#ifdef RTE_CRYPTO_SCHEDULER
+			uint32_t nb_workers =
+				rte_cryptodev_scheduler_workers_get(cdev_id,
 								NULL);
 
-			sessions_needed = 2 * enabled_cdev_count * nb_slaves;
+			sessions_needed = enabled_cdev_count * nb_workers;
 #endif
 		} else
-			sessions_needed = 2 * enabled_cdev_count;
+			sessions_needed = enabled_cdev_count;
 
-		if (session_pool_socket[socket_id] == NULL) {
+		if (session_pool_socket[socket_id].priv_mp == NULL) {
 			char mp_name[RTE_MEMPOOL_NAMESIZE];
-			struct rte_mempool *sess_mp;
 
 			snprintf(mp_name, RTE_MEMPOOL_NAMESIZE,
-				"sess_mp_%u", socket_id);
+				"priv_sess_mp_%u", socket_id);
 
-			/*
-			 * Create enough objects for session headers and
-			 * device private data
-			 */
-			sess_mp = rte_mempool_create(mp_name,
+			session_pool_socket[socket_id].priv_mp =
+					rte_mempool_create(mp_name,
 						sessions_needed,
 						max_sess_sz,
-						SESSION_POOL_CACHE_SIZE,
-						0, NULL, NULL, NULL,
+						0, 0, NULL, NULL, NULL,
 						NULL, socket_id,
 						0);
 
-			if (sess_mp == NULL) {
-				printf("Cannot create session pool on socket %d\n",
+			if (session_pool_socket[socket_id].priv_mp == NULL) {
+				printf("Cannot create pool on socket %d\n",
 					socket_id);
 				return -ENOMEM;
 			}
 
-			printf("Allocated session pool on socket %d\n", socket_id);
-			session_pool_socket[socket_id] = sess_mp;
+			printf("Allocated pool \"%s\" on socket %d\n",
+				mp_name, socket_id);
+		}
+
+		if (session_pool_socket[socket_id].sess_mp == NULL) {
+			char mp_name[RTE_MEMPOOL_NAMESIZE];
+			snprintf(mp_name, RTE_MEMPOOL_NAMESIZE,
+				"sess_mp_%u", socket_id);
+
+			session_pool_socket[socket_id].sess_mp =
+					rte_cryptodev_sym_session_pool_create(
+							mp_name,
+							sessions_needed,
+							0, 0, 0, socket_id);
+
+			if (session_pool_socket[socket_id].sess_mp == NULL) {
+				printf("Cannot create pool on socket %d\n",
+					socket_id);
+				return -ENOMEM;
+			}
+
+			printf("Allocated pool \"%s\" on socket %d\n",
+				mp_name, socket_id);
 		}
 
 		/* Set AEAD parameters */
@@ -2329,8 +2374,7 @@ initialize_cryptodevs(struct l2fwd_crypto_options *options, unsigned nb_ports,
 					options->aead_xform.aead.key.length =
 						cap->sym.aead.key_size.min;
 
-				generate_random_key(
-					options->aead_xform.aead.key.data,
+				generate_random_key(options->aead_key,
 					options->aead_xform.aead.key.length);
 			}
 
@@ -2387,8 +2431,7 @@ initialize_cryptodevs(struct l2fwd_crypto_options *options, unsigned nb_ports,
 					options->cipher_xform.cipher.key.length =
 						cap->sym.cipher.key_size.min;
 
-				generate_random_key(
-					options->cipher_xform.cipher.key.data,
+				generate_random_key(options->cipher_key,
 					options->cipher_xform.cipher.key.length);
 			}
 		}
@@ -2421,8 +2464,7 @@ initialize_cryptodevs(struct l2fwd_crypto_options *options, unsigned nb_ports,
 					options->auth_xform.auth.key.length =
 						cap->sym.auth.key_size.min;
 
-				generate_random_key(
-					options->auth_xform.auth.key.data,
+				generate_random_key(options->auth_key,
 					options->auth_xform.auth.key.length);
 			}
 
@@ -2443,9 +2485,12 @@ initialize_cryptodevs(struct l2fwd_crypto_options *options, unsigned nb_ports,
 		}
 
 		qp_conf.nb_descriptors = 2048;
+		qp_conf.mp_session = session_pool_socket[socket_id].sess_mp;
+		qp_conf.mp_session_private =
+				session_pool_socket[socket_id].priv_mp;
 
 		retval = rte_cryptodev_queue_pair_setup(cdev_id, 0, &qp_conf,
-				socket_id, session_pool_socket[socket_id]);
+				socket_id);
 		if (retval < 0) {
 			printf("Failed to setup queue pair %u on cryptodev %u",
 					0, cdev_id);
@@ -2493,7 +2538,14 @@ initialize_ports(struct l2fwd_crypto_options *options)
 		/* init port */
 		printf("Initializing port %u... ", portid);
 		fflush(stdout);
-		rte_eth_dev_info_get(portid, &dev_info);
+
+		retval = rte_eth_dev_info_get(portid, &dev_info);
+		if (retval != 0) {
+			printf("Error during getting device (port %u) info: %s\n",
+					portid, strerror(-retval));
+			return retval;
+		}
+
 		if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
 			local_port_conf.txmode.offloads |=
 				DEV_TX_OFFLOAD_MBUF_FAST_FREE;
@@ -2547,9 +2599,20 @@ initialize_ports(struct l2fwd_crypto_options *options)
 			return -1;
 		}
 
-		rte_eth_promiscuous_enable(portid);
+		retval = rte_eth_promiscuous_enable(portid);
+		if (retval != 0) {
+			printf("rte_eth_promiscuous_enable:err=%s, port=%u\n",
+				rte_strerror(-retval), portid);
+			return -1;
+		}
 
-		rte_eth_macaddr_get(portid, &l2fwd_ports_eth_addr[portid]);
+		retval = rte_eth_macaddr_get(portid,
+					     &l2fwd_ports_eth_addr[portid]);
+		if (retval < 0) {
+			printf("rte_eth_macaddr_get :err=%d, port=%u\n",
+					retval, portid);
+			return -1;
+		}
 
 		printf("Port %u, MAC address: %02X:%02X:%02X:%02X:%02X:%02X\n\n",
 				portid,
@@ -2571,7 +2634,7 @@ initialize_ports(struct l2fwd_crypto_options *options)
 			last_portid = portid;
 		}
 
-		l2fwd_enabled_port_mask |= (1 << portid);
+		l2fwd_enabled_port_mask |= (1ULL << portid);
 		enabled_portcount++;
 	}
 
@@ -2590,20 +2653,11 @@ initialize_ports(struct l2fwd_crypto_options *options)
 static void
 reserve_key_memory(struct l2fwd_crypto_options *options)
 {
-	options->cipher_xform.cipher.key.data = rte_malloc("crypto key",
-						MAX_KEY_SIZE, 0);
-	if (options->cipher_xform.cipher.key.data == NULL)
-		rte_exit(EXIT_FAILURE, "Failed to allocate memory for cipher key");
+	options->cipher_xform.cipher.key.data = options->cipher_key;
 
-	options->auth_xform.auth.key.data = rte_malloc("auth key",
-						MAX_KEY_SIZE, 0);
-	if (options->auth_xform.auth.key.data == NULL)
-		rte_exit(EXIT_FAILURE, "Failed to allocate memory for auth key");
+	options->auth_xform.auth.key.data = options->auth_key;
 
-	options->aead_xform.aead.key.data = rte_malloc("aead key",
-						MAX_KEY_SIZE, 0);
-	if (options->aead_xform.aead.key.data == NULL)
-		rte_exit(EXIT_FAILURE, "Failed to allocate memory for AEAD key");
+	options->aead_xform.aead.key.data = options->aead_key;
 
 	options->cipher_iv.data = rte_malloc("cipher iv", MAX_KEY_SIZE, 0);
 	if (options->cipher_iv.data == NULL)
@@ -2763,11 +2817,14 @@ main(int argc, char **argv)
 
 	/* launch per-lcore init on every lcore */
 	rte_eal_mp_remote_launch(l2fwd_launch_one_lcore, (void *)&options,
-			CALL_MASTER);
-	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+			CALL_MAIN);
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
 		if (rte_eal_wait_lcore(lcore_id) < 0)
 			return -1;
 	}
+
+	/* clean up the EAL */
+	rte_eal_cleanup();
 
 	return 0;
 }

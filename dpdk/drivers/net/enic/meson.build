@@ -6,20 +6,21 @@ sources = files(
 	'base/vnic_dev.c',
 	'base/vnic_intr.c',
 	'base/vnic_rq.c',
-	'base/vnic_rss.c',
 	'base/vnic_wq.c',
 	'enic_clsf.c',
 	'enic_ethdev.c',
 	'enic_flow.c',
+	'enic_fm_flow.c',
 	'enic_main.c',
 	'enic_res.c',
 	'enic_rxtx.c',
+	'enic_vf_representor.c',
 	)
 deps += ['hash']
 includes += include_directories('base')
 
 # The current implementation assumes 64-bit pointers
-if dpdk_conf.has('RTE_MACHINE_CPUFLAG_AVX2') and dpdk_conf.get('RTE_ARCH_64')
+if cc.get_define('__AVX2__', args: machine_args) != '' and dpdk_conf.get('RTE_ARCH_64')
 	sources += files('enic_rxtx_vec_avx2.c')
 # Build the avx2 handler if the compiler supports it, even though 'machine'
 # does not. This is to support users who build for the min supported machine

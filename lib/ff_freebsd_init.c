@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2010 Kip Macy All rights reserved.
- * Copyright (C) 2017 THL A29 Limited, a Tencent company.
+ * Copyright (C) 2017-2021 THL A29 Limited, a Tencent company.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -47,6 +47,14 @@
 #include "ff_api.h"
 #include "ff_config.h"
 
+#include <sys/socketvar.h>
+#include <sys/sockio.h>
+#include <net/if.h>
+#include <net/if_var.h>
+#include <netinet/in_var.h>
+
+int lo_set_defaultaddr(void);
+
 int ff_freebsd_init(void);
 
 extern void mutex_init(void);
@@ -63,6 +71,54 @@ int uma_page_mask;
 extern cpuset_t all_cpus;
 
 long physmem;
+
+extern void uma_startup1(vm_offset_t);
+
+int lo_set_defaultaddr(void)
+{
+    struct in_aliasreq req;
+    char *addr="127.0.0.1";
+    char *netmask="255.0.0.0";
+    struct ifnet *ifp=NULL;
+    int ret;
+
+    IFNET_WLOCK();
+    CK_STAILQ_FOREACH(ifp, &V_ifnet, if_link)
+        if ( (ifp->if_flags & IFF_LOOPBACK) != 0 )
+            break;
+    IFNET_WUNLOCK();
+
+    if(ifp == NULL)
+        return -1;
+
+    bzero(&req, sizeof req);
+    strcpy(req.ifra_name, ifp->if_xname);
+
+    struct sockaddr_in sa;
+    bzero(&sa, sizeof(sa));
+
+    sa.sin_len = sizeof(sa);
+    sa.sin_family = AF_INET;
+
+    inet_pton(AF_INET, addr, &sa.sin_addr.s_addr);
+    bcopy(&sa, &req.ifra_addr, sizeof(sa));
+
+    inet_pton(AF_INET, netmask, &sa.sin_addr.s_addr);
+    bcopy(&sa, &req.ifra_mask, sizeof(sa));
+
+    //sa.sin_addr.s_addr = sc->broadcast;
+    //bcopy(&sa, &req.ifra_broadaddr, sizeof(sa));
+
+    struct socket *so = NULL;
+    ret = socreate(AF_INET, &so, SOCK_DGRAM, 0, curthread->td_ucred, curthread);
+    if(ret != 0)
+        return ret;
+
+    ret = ifioctl(so, SIOCAIFADDR, (caddr_t)&req, curthread);
+    sofree(so);
+
+    return ret;
+}
 
 int
 ff_freebsd_init(void)
@@ -94,17 +150,19 @@ ff_freebsd_init(void)
 
     pcpup = malloc(sizeof(struct pcpu), M_DEVBUF, M_ZERO);
     pcpu_init(pcpup, 0, sizeof(struct pcpu));
+    PCPU_SET(prvspace, pcpup);
     CPU_SET(0, &all_cpus);
 
     ff_init_thread0();
 
     boot_pages = 16;
-    bootmem = (void *)kmem_malloc(NULL, boot_pages*PAGE_SIZE, M_ZERO);
-    uma_startup(bootmem, boot_pages);
+    bootmem = (void *)kmem_malloc(boot_pages*PAGE_SIZE, M_ZERO);
+    //uma_startup(bootmem, boot_pages);
+    uma_startup1((vm_offset_t)bootmem);
     uma_startup2();
 
     num_hash_buckets = 8192;
-    uma_page_slab_hash = (struct uma_page_head *)kmem_malloc(NULL, sizeof(struct uma_page)*num_hash_buckets, M_ZERO);
+    uma_page_slab_hash = (struct uma_page_head *)kmem_malloc(sizeof(struct uma_page)*num_hash_buckets, M_ZERO);
     uma_page_mask = num_hash_buckets - 1;
 
     mutex_init();
@@ -124,6 +182,10 @@ ff_freebsd_init(void)
 
         cur = cur->next;
     }
+
+    error = lo_set_defaultaddr();
+    if(error != 0)
+        printf("set loopback port default addr failed!");
 
     return (0);
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 THL A29 Limited, a Tencent company.
+ * Copyright (C) 2017-2021 THL A29 Limited, a Tencent company.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -30,8 +30,8 @@
 #include <rte_config.h>
 #include <rte_mbuf.h>
 
-int ff_enable_pcap(const char* dump_path);
-int ff_dump_packets(const char* dump_path, struct rte_mbuf *pkt);
+int ff_enable_pcap(const char* dump_path, uint16_t snap_len);
+int ff_dump_packets(const char* dump_path, struct rte_mbuf *pkt, uint16_t snap_len, uint32_t f_maxlen);
 
 
 #endif /* ifndef _FSTACK_DPDK_PCAP_H */

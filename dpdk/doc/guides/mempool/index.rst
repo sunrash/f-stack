@@ -12,3 +12,6 @@ application through the mempool API.
     :numbered:
 
     octeontx
+    octeontx2
+    ring
+    stack

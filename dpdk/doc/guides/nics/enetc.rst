@@ -4,7 +4,7 @@
 ENETC Poll Mode Driver
 ======================
 
-The ENETC NIC PMD (**librte_pmd_enetc**) provides poll mode driver
+The ENETC NIC PMD (**librte_net_enetc**) provides poll mode driver
 support for the inbuilt NIC found in the **NXP LS1028** SoC.
 
 More information can be found at `NXP Official Website
@@ -46,6 +46,13 @@ ENETC Features
 
 - Link Status
 - Packet type information
+- Basic stats
+- Promiscuous
+- Multicast
+- Jumbo packets
+- Queue Start/Stop
+- Deferred Queue Start
+- CRC offload
 
 NIC Driver (PMD)
 ~~~~~~~~~~~~~~~~
@@ -106,5 +113,3 @@ Driver compilation and testing
 Follow instructions available in the document
 :ref:`compiling and testing a PMD for a NIC <pmd_build_and_test>`
 to launch **testpmd**
-
-To compile in performance mode, please set ``CONFIG_RTE_CACHE_LINE_SIZE=64``
