@@ -16,6 +16,9 @@
 #define ICE_RX_MAX_BURST 32
 #define ICE_TX_MAX_BURST 32
 
+/* Maximal number of segments to split. */
+#define ICE_RX_MAX_NSEG 2
+
 #define ICE_CHK_Q_ENA_COUNT        100
 #define ICE_CHK_Q_ENA_INTERVAL_US  100
 
@@ -40,6 +43,21 @@
 
 #define ICE_RXDID_COMMS_OVS	22
 
+#define ICE_TX_MIN_PKT_LEN 17
+
+extern uint64_t ice_timestamp_dynflag;
+extern int ice_timestamp_dynfield_offset;
+
+/* Max header size can be 2K - 64 bytes */
+#define ICE_RX_HDR_BUF_SIZE    (2048 - 64)
+
+/* Max data buffer size must be 16K - 128 bytes */
+#define ICE_RX_MAX_DATA_BUF_SIZE	(16 * 1024 - 128)
+
+#define ICE_HEADER_SPLIT_ENA   BIT(0)
+
+#define ICE_TX_MTU_SEG_MAX	8
+
 typedef void (*ice_rx_release_mbufs_t)(struct ice_rx_queue *rxq);
 typedef void (*ice_tx_release_mbufs_t)(struct ice_tx_queue *txq);
 typedef void (*ice_rxd_to_pkt_fields_t)(struct ice_rx_queue *rxq,
@@ -48,6 +66,12 @@ typedef void (*ice_rxd_to_pkt_fields_t)(struct ice_rx_queue *rxq,
 
 struct ice_rx_entry {
 	struct rte_mbuf *mbuf;
+};
+
+enum ice_rx_dtype {
+	ICE_RX_DTYPE_NO_SPLIT       = 0,
+	ICE_RX_DTYPE_HEADER_SPLIT   = 1,
+	ICE_RX_DTYPE_SPLIT_ALWAYS   = 2,
 };
 
 struct ice_rx_queue {
@@ -85,10 +109,20 @@ struct ice_rx_queue {
 	bool q_set; /* indicate if rx queue has been configured */
 	bool rx_deferred_start; /* don't start this queue in dev start */
 	uint8_t proto_xtr; /* Protocol extraction from flexible descriptor */
+	int xtr_field_offs; /*Protocol extraction matedata offset*/
 	uint64_t xtr_ol_flag; /* Protocol extraction offload flag */
 	uint32_t rxdid; /* Receive Flex Descriptor profile ID */
 	ice_rx_release_mbufs_t rx_rel_mbufs;
+	uint64_t offloads;
+	uint32_t time_high;
+	uint32_t hw_register_set;
 	const struct rte_memzone *mz;
+	uint32_t hw_time_high; /* high 32 bits of timestamp */
+	uint32_t hw_time_low; /* low 32 bits of timestamp */
+	uint64_t hw_time_update; /* SW time of HW record updating */
+	struct rte_eth_rxseg_split rxseg[ICE_RX_MAX_NSEG];
+	uint32_t rxseg_nb;
+	bool ts_enable; /* if rxq timestamp is enabled */
 };
 
 struct ice_tx_entry {
@@ -210,6 +244,8 @@ int ice_fdir_rx_queue_stop(struct rte_eth_dev *dev, uint16_t rx_queue_id);
 int ice_fdir_tx_queue_stop(struct rte_eth_dev *dev, uint16_t tx_queue_id);
 void ice_rx_queue_release(void *rxq);
 void ice_tx_queue_release(void *txq);
+void ice_dev_rx_queue_release(struct rte_eth_dev *dev, uint16_t qid);
+void ice_dev_tx_queue_release(struct rte_eth_dev *dev, uint16_t qid);
 void ice_free_queues(struct rte_eth_dev *dev);
 int ice_fdir_setup_tx_resources(struct ice_pf *pf);
 int ice_fdir_setup_rx_resources(struct ice_pf *pf);
@@ -223,7 +259,7 @@ uint16_t ice_prep_pkts(__rte_unused void *tx_queue, struct rte_mbuf **tx_pkts,
 void ice_set_tx_function_flag(struct rte_eth_dev *dev,
 			      struct ice_tx_queue *txq);
 void ice_set_tx_function(struct rte_eth_dev *dev);
-uint32_t ice_rx_queue_count(struct rte_eth_dev *dev, uint16_t rx_queue_id);
+uint32_t ice_rx_queue_count(void *rx_queue);
 void ice_rxq_info_get(struct rte_eth_dev *dev, uint16_t queue_id,
 		      struct rte_eth_rxq_info *qinfo);
 void ice_txq_info_get(struct rte_eth_dev *dev, uint16_t queue_id,
@@ -251,20 +287,37 @@ uint16_t ice_xmit_pkts_vec(void *tx_queue, struct rte_mbuf **tx_pkts,
 			   uint16_t nb_pkts);
 uint16_t ice_recv_pkts_vec_avx2(void *rx_queue, struct rte_mbuf **rx_pkts,
 				uint16_t nb_pkts);
+uint16_t ice_recv_pkts_vec_avx2_offload(void *rx_queue, struct rte_mbuf **rx_pkts,
+					uint16_t nb_pkts);
 uint16_t ice_recv_scattered_pkts_vec_avx2(void *rx_queue,
 					  struct rte_mbuf **rx_pkts,
 					  uint16_t nb_pkts);
+uint16_t ice_recv_scattered_pkts_vec_avx2_offload(void *rx_queue,
+						  struct rte_mbuf **rx_pkts,
+						  uint16_t nb_pkts);
 uint16_t ice_xmit_pkts_vec_avx2(void *tx_queue, struct rte_mbuf **tx_pkts,
 				uint16_t nb_pkts);
+uint16_t ice_xmit_pkts_vec_avx2_offload(void *tx_queue, struct rte_mbuf **tx_pkts,
+					uint16_t nb_pkts);
 uint16_t ice_recv_pkts_vec_avx512(void *rx_queue, struct rte_mbuf **rx_pkts,
 				  uint16_t nb_pkts);
+uint16_t ice_recv_pkts_vec_avx512_offload(void *rx_queue,
+					  struct rte_mbuf **rx_pkts,
+					  uint16_t nb_pkts);
 uint16_t ice_recv_scattered_pkts_vec_avx512(void *rx_queue,
 					    struct rte_mbuf **rx_pkts,
 					    uint16_t nb_pkts);
+uint16_t ice_recv_scattered_pkts_vec_avx512_offload(void *rx_queue,
+						    struct rte_mbuf **rx_pkts,
+						    uint16_t nb_pkts);
 uint16_t ice_xmit_pkts_vec_avx512(void *tx_queue, struct rte_mbuf **tx_pkts,
 				  uint16_t nb_pkts);
+uint16_t ice_xmit_pkts_vec_avx512_offload(void *tx_queue,
+					  struct rte_mbuf **tx_pkts,
+					  uint16_t nb_pkts);
 int ice_fdir_programming(struct ice_pf *pf, struct ice_fltr_desc *fdir_desc);
 int ice_tx_done_cleanup(void *txq, uint32_t free_cnt);
+int ice_get_monitor_addr(void *rx_queue, struct rte_power_monitor_cond *pmc);
 
 #define FDIR_PARSING_ENABLE_PER_QUEUE(ad, on) do { \
 	int i; \
@@ -293,6 +346,50 @@ void ice_fdir_rx_parsing_enable(struct ice_adapter *ad, bool on)
 				FDIR_PARSING_ENABLE_PER_QUEUE(ad, on);
 		}
 	}
+}
+
+#define ICE_TIMESYNC_REG_WRAP_GUARD_BAND  10000
+
+/* Helper function to convert a 32b nanoseconds timestamp to 64b. */
+static inline
+uint64_t ice_tstamp_convert_32b_64b(struct ice_hw *hw, struct ice_adapter *ad,
+				    uint32_t flag, uint32_t in_timestamp)
+{
+	uint8_t tmr_idx = hw->func_caps.ts_func_info.tmr_index_assoc;
+	const uint64_t mask = 0xFFFFFFFF;
+	uint32_t hi, lo, lo2, delta;
+	uint64_t ns;
+
+	if (flag) {
+		lo = ICE_READ_REG(hw, GLTSYN_TIME_L(tmr_idx));
+		hi = ICE_READ_REG(hw, GLTSYN_TIME_H(tmr_idx));
+
+		/*
+		 * On typical system, the delta between lo and lo2 is ~1000ns,
+		 * so 10000 seems a large-enough but not overly-big guard band.
+		 */
+		if (lo > (UINT32_MAX - ICE_TIMESYNC_REG_WRAP_GUARD_BAND))
+			lo2 = ICE_READ_REG(hw, GLTSYN_TIME_L(tmr_idx));
+		else
+			lo2 = lo;
+
+		if (lo2 < lo) {
+			lo = ICE_READ_REG(hw, GLTSYN_TIME_L(tmr_idx));
+			hi = ICE_READ_REG(hw, GLTSYN_TIME_H(tmr_idx));
+		}
+
+		ad->time_hw = ((uint64_t)hi << 32) | lo;
+	}
+
+	delta = (in_timestamp - (uint32_t)(ad->time_hw & mask));
+	if (delta > (mask / 2)) {
+		delta = ((uint32_t)(ad->time_hw & mask) - in_timestamp);
+		ns = ad->time_hw - delta;
+	} else {
+		ns = ad->time_hw + delta;
+	}
+
+	return ns;
 }
 
 #endif /* _ICE_RXTX_H_ */

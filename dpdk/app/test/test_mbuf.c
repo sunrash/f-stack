@@ -2,6 +2,8 @@
  * Copyright(c) 2010-2014 Intel Corporation
  */
 
+#include "test.h"
+
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -21,7 +23,6 @@
 #include <rte_eal.h>
 #include <rte_per_lcore.h>
 #include <rte_lcore.h>
-#include <rte_atomic.h>
 #include <rte_branch_prediction.h>
 #include <rte_ring.h>
 #include <rte_mempool.h>
@@ -33,8 +34,6 @@
 #include <rte_ip.h>
 #include <rte_tcp.h>
 #include <rte_mbuf_dyn.h>
-
-#include "test.h"
 
 #define MEMPOOL_CACHE_SIZE      32
 #define MBUF_DATA_SIZE          2048
@@ -305,8 +304,7 @@ test_one_pktmbuf(struct rte_mempool *pktmbuf_pool)
 	return 0;
 
 fail:
-	if (m)
-		rte_pktmbuf_free(m);
+	rte_pktmbuf_free(m);
 	return -1;
 }
 
@@ -417,12 +415,9 @@ testclone_testupdate_testdetach(struct rte_mempool *pktmbuf_pool,
 	return 0;
 
 fail:
-	if (m)
-		rte_pktmbuf_free(m);
-	if (clone)
-		rte_pktmbuf_free(clone);
-	if (clone2)
-		rte_pktmbuf_free(clone2);
+	rte_pktmbuf_free(m);
+	rte_pktmbuf_free(clone);
+	rte_pktmbuf_free(clone2);
 	return -1;
 }
 
@@ -573,12 +568,9 @@ test_pktmbuf_copy(struct rte_mempool *pktmbuf_pool,
 	return 0;
 
 fail:
-	if (m)
-		rte_pktmbuf_free(m);
-	if (copy)
-		rte_pktmbuf_free(copy);
-	if (copy2)
-		rte_pktmbuf_free(copy2);
+	rte_pktmbuf_free(m);
+	rte_pktmbuf_free(copy);
+	rte_pktmbuf_free(copy2);
 	return -1;
 }
 
@@ -680,12 +672,9 @@ test_attach_from_different_pool(struct rte_mempool *pktmbuf_pool,
 	return 0;
 
 fail:
-	if (m)
-		rte_pktmbuf_free(m);
-	if (clone)
-		rte_pktmbuf_free(clone);
-	if (clone2)
-		rte_pktmbuf_free(clone2);
+	rte_pktmbuf_free(m);
+	rte_pktmbuf_free(clone);
+	rte_pktmbuf_free(clone2);
 	return -1;
 }
 
@@ -723,8 +712,7 @@ test_pktmbuf_pool(struct rte_mempool *pktmbuf_pool)
 	}
 	/* free them */
 	for (i=0; i<NB_MBUF; i++) {
-		if (m[i] != NULL)
-			rte_pktmbuf_free(m[i]);
+		rte_pktmbuf_free(m[i]);
 	}
 
 	return ret;
@@ -925,8 +913,7 @@ test_pktmbuf_pool_ptr(struct rte_mempool *pktmbuf_pool)
 
 	/* free them */
 	for (i=0; i<NB_MBUF; i++) {
-		if (m[i] != NULL)
-			rte_pktmbuf_free(m[i]);
+		rte_pktmbuf_free(m[i]);
 	}
 
 	for (i=0; i<NB_MBUF; i++)
@@ -948,8 +935,7 @@ test_pktmbuf_pool_ptr(struct rte_mempool *pktmbuf_pool)
 
 	/* free them */
 	for (i=0; i<NB_MBUF; i++) {
-		if (m[i] != NULL)
-			rte_pktmbuf_free(m[i]);
+		rte_pktmbuf_free(m[i]);
 	}
 
 	return ret;
@@ -1173,37 +1159,24 @@ err:
 #endif
 }
 
-#include <unistd.h>
-#include <sys/resource.h>
-#include <sys/time.h>
-#include <sys/wait.h>
-
-/* use fork() to test mbuf errors panic */
+#ifdef RTE_EXEC_ENV_WINDOWS
 static int
-verify_mbuf_check_panics(struct rte_mbuf *buf)
+test_failing_mbuf_sanity_check(struct rte_mempool *pktmbuf_pool)
 {
-	int pid;
-	int status;
+	RTE_SET_USED(pktmbuf_pool);
+	return TEST_SKIPPED;
+}
+#else
+/* Verify if mbuf can pass the check */
+static bool
+mbuf_check_pass(struct rte_mbuf *buf)
+{
+	const char *reason;
 
-	pid = fork();
+	if (rte_mbuf_check(buf, 1, &reason) == 0)
+		return true;
 
-	if (pid == 0) {
-		struct rlimit rl;
-
-		/* No need to generate a coredump when panicking. */
-		rl.rlim_cur = rl.rlim_max = 0;
-		setrlimit(RLIMIT_CORE, &rl);
-		rte_mbuf_sanity_check(buf, 1); /* should panic */
-		exit(0);  /* return normally if it doesn't panic */
-	} else if (pid < 0) {
-		printf("Fork Failed\n");
-		return -1;
-	}
-	wait(&status);
-	if(status == 0)
-		return -1;
-
-	return 0;
+	return false;
 }
 
 static int
@@ -1220,53 +1193,57 @@ test_failing_mbuf_sanity_check(struct rte_mempool *pktmbuf_pool)
 		return -1;
 
 	printf("Checking good mbuf initially\n");
-	if (verify_mbuf_check_panics(buf) != -1)
+	if (!mbuf_check_pass(buf))
 		return -1;
 
 	printf("Now checking for error conditions\n");
 
-	if (verify_mbuf_check_panics(NULL)) {
+	if (mbuf_check_pass(NULL)) {
 		printf("Error with NULL mbuf test\n");
 		return -1;
 	}
 
 	badbuf = *buf;
 	badbuf.pool = NULL;
-	if (verify_mbuf_check_panics(&badbuf)) {
+	if (mbuf_check_pass(&badbuf)) {
 		printf("Error with bad-pool mbuf test\n");
 		return -1;
 	}
 
-	badbuf = *buf;
-	badbuf.buf_iova = 0;
-	if (verify_mbuf_check_panics(&badbuf)) {
-		printf("Error with bad-physaddr mbuf test\n");
-		return -1;
+	if (RTE_IOVA_AS_PA) {
+		badbuf = *buf;
+		rte_mbuf_iova_set(&badbuf, 0);
+		if (mbuf_check_pass(&badbuf)) {
+			printf("Error with bad-physaddr mbuf test\n");
+			return -1;
+		}
 	}
 
 	badbuf = *buf;
 	badbuf.buf_addr = NULL;
-	if (verify_mbuf_check_panics(&badbuf)) {
+	if (mbuf_check_pass(&badbuf)) {
 		printf("Error with bad-addr mbuf test\n");
 		return -1;
 	}
 
 	badbuf = *buf;
 	badbuf.refcnt = 0;
-	if (verify_mbuf_check_panics(&badbuf)) {
+	if (mbuf_check_pass(&badbuf)) {
 		printf("Error with bad-refcnt(0) mbuf test\n");
 		return -1;
 	}
 
 	badbuf = *buf;
 	badbuf.refcnt = UINT16_MAX;
-	if (verify_mbuf_check_panics(&badbuf)) {
+	if (mbuf_check_pass(&badbuf)) {
 		printf("Error with bad-refcnt(MAX) mbuf test\n");
 		return -1;
 	}
 
 	return 0;
 }
+
+#endif /* !RTE_EXEC_ENV_WINDOWS */
 
 static int
 test_mbuf_linearize(struct rte_mempool *pktmbuf_pool, int pkt_len,
@@ -1356,8 +1333,7 @@ test_mbuf_linearize(struct rte_mempool *pktmbuf_pool, int pkt_len,
 	return 0;
 
 fail:
-	if (mbuf)
-		rte_pktmbuf_free(mbuf);
+	rte_pktmbuf_free(mbuf);
 	return -1;
 }
 
@@ -1495,7 +1471,7 @@ test_get_rx_ol_flag_list(void)
 		GOTO_FAIL("%s expected: -1, received = %d\n", __func__, ret);
 
 	/* Test case to check with zero buffer len */
-	ret = rte_get_rx_ol_flag_list(PKT_RX_L4_CKSUM_MASK, buf, 0);
+	ret = rte_get_rx_ol_flag_list(RTE_MBUF_F_RX_L4_CKSUM_MASK, buf, 0);
 	if (ret != -1)
 		GOTO_FAIL("%s expected: -1, received = %d\n", __func__, ret);
 
@@ -1526,7 +1502,8 @@ test_get_rx_ol_flag_list(void)
 				"non-zero, buffer should not be empty");
 
 	/* Test case to check with valid mask value */
-	ret = rte_get_rx_ol_flag_list(PKT_RX_SEC_OFFLOAD, buf, sizeof(buf));
+	ret = rte_get_rx_ol_flag_list(RTE_MBUF_F_RX_SEC_OFFLOAD, buf,
+				      sizeof(buf));
 	if (ret != 0)
 		GOTO_FAIL("%s expected: 0, received = %d\n", __func__, ret);
 
@@ -1553,7 +1530,7 @@ test_get_tx_ol_flag_list(void)
 		GOTO_FAIL("%s expected: -1, received = %d\n", __func__, ret);
 
 	/* Test case to check with zero buffer len */
-	ret = rte_get_tx_ol_flag_list(PKT_TX_IP_CKSUM, buf, 0);
+	ret = rte_get_tx_ol_flag_list(RTE_MBUF_F_TX_IP_CKSUM, buf, 0);
 	if (ret != -1)
 		GOTO_FAIL("%s expected: -1, received = %d\n", __func__, ret);
 
@@ -1585,7 +1562,8 @@ test_get_tx_ol_flag_list(void)
 				"non-zero, buffer should not be empty");
 
 	/* Test case to check with valid mask value */
-	ret = rte_get_tx_ol_flag_list(PKT_TX_UDP_CKSUM, buf, sizeof(buf));
+	ret = rte_get_tx_ol_flag_list(RTE_MBUF_F_TX_UDP_CKSUM, buf,
+				      sizeof(buf));
 	if (ret != 0)
 		GOTO_FAIL("%s expected: 0, received = %d\n", __func__, ret);
 
@@ -1611,28 +1589,28 @@ test_get_rx_ol_flag_name(void)
 	uint16_t i;
 	const char *flag_str = NULL;
 	const struct flag_name rx_flags[] = {
-		VAL_NAME(PKT_RX_VLAN),
-		VAL_NAME(PKT_RX_RSS_HASH),
-		VAL_NAME(PKT_RX_FDIR),
-		VAL_NAME(PKT_RX_L4_CKSUM_BAD),
-		VAL_NAME(PKT_RX_L4_CKSUM_GOOD),
-		VAL_NAME(PKT_RX_L4_CKSUM_NONE),
-		VAL_NAME(PKT_RX_IP_CKSUM_BAD),
-		VAL_NAME(PKT_RX_IP_CKSUM_GOOD),
-		VAL_NAME(PKT_RX_IP_CKSUM_NONE),
-		VAL_NAME(PKT_RX_EIP_CKSUM_BAD),
-		VAL_NAME(PKT_RX_VLAN_STRIPPED),
-		VAL_NAME(PKT_RX_IEEE1588_PTP),
-		VAL_NAME(PKT_RX_IEEE1588_TMST),
-		VAL_NAME(PKT_RX_FDIR_ID),
-		VAL_NAME(PKT_RX_FDIR_FLX),
-		VAL_NAME(PKT_RX_QINQ_STRIPPED),
-		VAL_NAME(PKT_RX_LRO),
-		VAL_NAME(PKT_RX_SEC_OFFLOAD),
-		VAL_NAME(PKT_RX_SEC_OFFLOAD_FAILED),
-		VAL_NAME(PKT_RX_OUTER_L4_CKSUM_BAD),
-		VAL_NAME(PKT_RX_OUTER_L4_CKSUM_GOOD),
-		VAL_NAME(PKT_RX_OUTER_L4_CKSUM_INVALID),
+		VAL_NAME(RTE_MBUF_F_RX_VLAN),
+		VAL_NAME(RTE_MBUF_F_RX_RSS_HASH),
+		VAL_NAME(RTE_MBUF_F_RX_FDIR),
+		VAL_NAME(RTE_MBUF_F_RX_L4_CKSUM_BAD),
+		VAL_NAME(RTE_MBUF_F_RX_L4_CKSUM_GOOD),
+		VAL_NAME(RTE_MBUF_F_RX_L4_CKSUM_NONE),
+		VAL_NAME(RTE_MBUF_F_RX_IP_CKSUM_BAD),
+		VAL_NAME(RTE_MBUF_F_RX_IP_CKSUM_GOOD),
+		VAL_NAME(RTE_MBUF_F_RX_IP_CKSUM_NONE),
+		VAL_NAME(RTE_MBUF_F_RX_OUTER_IP_CKSUM_BAD),
+		VAL_NAME(RTE_MBUF_F_RX_VLAN_STRIPPED),
+		VAL_NAME(RTE_MBUF_F_RX_IEEE1588_PTP),
+		VAL_NAME(RTE_MBUF_F_RX_IEEE1588_TMST),
+		VAL_NAME(RTE_MBUF_F_RX_FDIR_ID),
+		VAL_NAME(RTE_MBUF_F_RX_FDIR_FLX),
+		VAL_NAME(RTE_MBUF_F_RX_QINQ_STRIPPED),
+		VAL_NAME(RTE_MBUF_F_RX_LRO),
+		VAL_NAME(RTE_MBUF_F_RX_SEC_OFFLOAD),
+		VAL_NAME(RTE_MBUF_F_RX_SEC_OFFLOAD_FAILED),
+		VAL_NAME(RTE_MBUF_F_RX_OUTER_L4_CKSUM_BAD),
+		VAL_NAME(RTE_MBUF_F_RX_OUTER_L4_CKSUM_GOOD),
+		VAL_NAME(RTE_MBUF_F_RX_OUTER_L4_CKSUM_INVALID),
 	};
 
 	/* Test case to check with valid flag */
@@ -1663,31 +1641,31 @@ test_get_tx_ol_flag_name(void)
 	uint16_t i;
 	const char *flag_str = NULL;
 	const struct flag_name tx_flags[] = {
-		VAL_NAME(PKT_TX_VLAN),
-		VAL_NAME(PKT_TX_IP_CKSUM),
-		VAL_NAME(PKT_TX_TCP_CKSUM),
-		VAL_NAME(PKT_TX_SCTP_CKSUM),
-		VAL_NAME(PKT_TX_UDP_CKSUM),
-		VAL_NAME(PKT_TX_IEEE1588_TMST),
-		VAL_NAME(PKT_TX_TCP_SEG),
-		VAL_NAME(PKT_TX_IPV4),
-		VAL_NAME(PKT_TX_IPV6),
-		VAL_NAME(PKT_TX_OUTER_IP_CKSUM),
-		VAL_NAME(PKT_TX_OUTER_IPV4),
-		VAL_NAME(PKT_TX_OUTER_IPV6),
-		VAL_NAME(PKT_TX_TUNNEL_VXLAN),
-		VAL_NAME(PKT_TX_TUNNEL_GRE),
-		VAL_NAME(PKT_TX_TUNNEL_IPIP),
-		VAL_NAME(PKT_TX_TUNNEL_GENEVE),
-		VAL_NAME(PKT_TX_TUNNEL_MPLSINUDP),
-		VAL_NAME(PKT_TX_TUNNEL_VXLAN_GPE),
-		VAL_NAME(PKT_TX_TUNNEL_IP),
-		VAL_NAME(PKT_TX_TUNNEL_UDP),
-		VAL_NAME(PKT_TX_QINQ),
-		VAL_NAME(PKT_TX_MACSEC),
-		VAL_NAME(PKT_TX_SEC_OFFLOAD),
-		VAL_NAME(PKT_TX_UDP_SEG),
-		VAL_NAME(PKT_TX_OUTER_UDP_CKSUM),
+		VAL_NAME(RTE_MBUF_F_TX_VLAN),
+		VAL_NAME(RTE_MBUF_F_TX_IP_CKSUM),
+		VAL_NAME(RTE_MBUF_F_TX_TCP_CKSUM),
+		VAL_NAME(RTE_MBUF_F_TX_SCTP_CKSUM),
+		VAL_NAME(RTE_MBUF_F_TX_UDP_CKSUM),
+		VAL_NAME(RTE_MBUF_F_TX_IEEE1588_TMST),
+		VAL_NAME(RTE_MBUF_F_TX_TCP_SEG),
+		VAL_NAME(RTE_MBUF_F_TX_IPV4),
+		VAL_NAME(RTE_MBUF_F_TX_IPV6),
+		VAL_NAME(RTE_MBUF_F_TX_OUTER_IP_CKSUM),
+		VAL_NAME(RTE_MBUF_F_TX_OUTER_IPV4),
+		VAL_NAME(RTE_MBUF_F_TX_OUTER_IPV6),
+		VAL_NAME(RTE_MBUF_F_TX_TUNNEL_VXLAN),
+		VAL_NAME(RTE_MBUF_F_TX_TUNNEL_GRE),
+		VAL_NAME(RTE_MBUF_F_TX_TUNNEL_IPIP),
+		VAL_NAME(RTE_MBUF_F_TX_TUNNEL_GENEVE),
+		VAL_NAME(RTE_MBUF_F_TX_TUNNEL_MPLSINUDP),
+		VAL_NAME(RTE_MBUF_F_TX_TUNNEL_VXLAN_GPE),
+		VAL_NAME(RTE_MBUF_F_TX_TUNNEL_IP),
+		VAL_NAME(RTE_MBUF_F_TX_TUNNEL_UDP),
+		VAL_NAME(RTE_MBUF_F_TX_QINQ),
+		VAL_NAME(RTE_MBUF_F_TX_MACSEC),
+		VAL_NAME(RTE_MBUF_F_TX_SEC_OFFLOAD),
+		VAL_NAME(RTE_MBUF_F_TX_UDP_SEG),
+		VAL_NAME(RTE_MBUF_F_TX_OUTER_UDP_CKSUM),
 	};
 
 	/* Test case to check with valid flag */
@@ -1755,8 +1733,8 @@ test_mbuf_validate_tx_offload_one(struct rte_mempool *pktmbuf_pool)
 
 	/* test to validate if IP checksum is counted only for IPV4 packet */
 	/* set both IP checksum and IPV6 flags */
-	ol_flags |= PKT_TX_IP_CKSUM;
-	ol_flags |= PKT_TX_IPV6;
+	ol_flags |= RTE_MBUF_F_TX_IP_CKSUM;
+	ol_flags |= RTE_MBUF_F_TX_IPV6;
 	if (test_mbuf_validate_tx_offload("MBUF_TEST_IP_CKSUM_IPV6_SET",
 				pktmbuf_pool,
 				ol_flags, 0, -EINVAL) < 0)
@@ -1765,14 +1743,14 @@ test_mbuf_validate_tx_offload_one(struct rte_mempool *pktmbuf_pool)
 	ol_flags = 0;
 
 	/* test to validate if IP type is set when required */
-	ol_flags |= PKT_TX_L4_MASK;
+	ol_flags |= RTE_MBUF_F_TX_L4_MASK;
 	if (test_mbuf_validate_tx_offload("MBUF_TEST_IP_TYPE_NOT_SET",
 				pktmbuf_pool,
 				ol_flags, 0, -EINVAL) < 0)
 		GOTO_FAIL("%s failed: IP type is not set.\n", __func__);
 
 	/* test if IP type is set when TCP SEG is on */
-	ol_flags |= PKT_TX_TCP_SEG;
+	ol_flags |= RTE_MBUF_F_TX_TCP_SEG;
 	if (test_mbuf_validate_tx_offload("MBUF_TEST_IP_TYPE_NOT_SET",
 				pktmbuf_pool,
 				ol_flags, 0, -EINVAL) < 0)
@@ -1780,8 +1758,8 @@ test_mbuf_validate_tx_offload_one(struct rte_mempool *pktmbuf_pool)
 
 	ol_flags = 0;
 	/* test to confirm IP type (IPV4/IPV6) is set */
-	ol_flags = PKT_TX_L4_MASK;
-	ol_flags |= PKT_TX_IPV6;
+	ol_flags = RTE_MBUF_F_TX_L4_MASK;
+	ol_flags |= RTE_MBUF_F_TX_IPV6;
 	if (test_mbuf_validate_tx_offload("MBUF_TEST_IP_TYPE_SET",
 				pktmbuf_pool,
 				ol_flags, 0, 0) < 0)
@@ -1789,15 +1767,15 @@ test_mbuf_validate_tx_offload_one(struct rte_mempool *pktmbuf_pool)
 
 	ol_flags = 0;
 	/* test to check TSO segment size is non-zero */
-	ol_flags |= PKT_TX_IPV4;
-	ol_flags |= PKT_TX_TCP_SEG;
+	ol_flags |= RTE_MBUF_F_TX_IPV4;
+	ol_flags |= RTE_MBUF_F_TX_TCP_SEG;
 	/* set 0 tso segment size */
 	if (test_mbuf_validate_tx_offload("MBUF_TEST_NULL_TSO_SEGSZ",
 				pktmbuf_pool,
 				ol_flags, 0, -EINVAL) < 0)
 		GOTO_FAIL("%s failed: tso segment size is null.\n", __func__);
 
-	/* retain IPV4 and PKT_TX_TCP_SEG mask */
+	/* retain IPV4 and RTE_MBUF_F_TX_TCP_SEG mask */
 	/* set valid tso segment size but IP CKSUM not set */
 	if (test_mbuf_validate_tx_offload("MBUF_TEST_TSO_IP_CKSUM_NOT_SET",
 				pktmbuf_pool,
@@ -1806,7 +1784,7 @@ test_mbuf_validate_tx_offload_one(struct rte_mempool *pktmbuf_pool)
 
 	/* test to validate if IP checksum is set for TSO capability */
 	/* retain IPV4, TCP_SEG, tso_seg size */
-	ol_flags |= PKT_TX_IP_CKSUM;
+	ol_flags |= RTE_MBUF_F_TX_IP_CKSUM;
 	if (test_mbuf_validate_tx_offload("MBUF_TEST_TSO_IP_CKSUM_SET",
 				pktmbuf_pool,
 				ol_flags, 512, 0) < 0)
@@ -1814,8 +1792,8 @@ test_mbuf_validate_tx_offload_one(struct rte_mempool *pktmbuf_pool)
 
 	/* test to confirm TSO for IPV6 type */
 	ol_flags = 0;
-	ol_flags |= PKT_TX_IPV6;
-	ol_flags |= PKT_TX_TCP_SEG;
+	ol_flags |= RTE_MBUF_F_TX_IPV6;
+	ol_flags |= RTE_MBUF_F_TX_TCP_SEG;
 	if (test_mbuf_validate_tx_offload("MBUF_TEST_TSO_IPV6_SET",
 				pktmbuf_pool,
 				ol_flags, 512, 0) < 0)
@@ -1823,8 +1801,8 @@ test_mbuf_validate_tx_offload_one(struct rte_mempool *pktmbuf_pool)
 
 	ol_flags = 0;
 	/* test if outer IP checksum set for non outer IPv4 packet */
-	ol_flags |= PKT_TX_IPV6;
-	ol_flags |= PKT_TX_OUTER_IP_CKSUM;
+	ol_flags |= RTE_MBUF_F_TX_IPV6;
+	ol_flags |= RTE_MBUF_F_TX_OUTER_IP_CKSUM;
 	if (test_mbuf_validate_tx_offload("MBUF_TEST_OUTER_IPV4_NOT_SET",
 				pktmbuf_pool,
 				ol_flags, 512, -EINVAL) < 0)
@@ -1832,8 +1810,8 @@ test_mbuf_validate_tx_offload_one(struct rte_mempool *pktmbuf_pool)
 
 	ol_flags = 0;
 	/* test to confirm outer IP checksum is set for outer IPV4 packet */
-	ol_flags |= PKT_TX_OUTER_IP_CKSUM;
-	ol_flags |= PKT_TX_OUTER_IPV4;
+	ol_flags |= RTE_MBUF_F_TX_OUTER_IP_CKSUM;
+	ol_flags |= RTE_MBUF_F_TX_OUTER_IPV4;
 	if (test_mbuf_validate_tx_offload("MBUF_TEST_OUTER_IPV4_SET",
 				pktmbuf_pool,
 				ol_flags, 512, 0) < 0)
@@ -2363,21 +2341,18 @@ test_pktmbuf_ext_shinfo_init_helper(struct rte_mempool *pktmbuf_pool)
 	buf_iova = rte_mem_virt2iova(ext_buf_addr);
 	rte_pktmbuf_attach_extbuf(m, ext_buf_addr, buf_iova, buf_len,
 		ret_shinfo);
-	if (m->ol_flags != EXT_ATTACHED_MBUF)
+	if (m->ol_flags != RTE_MBUF_F_EXTERNAL)
 		GOTO_FAIL("%s: External buffer is not attached to mbuf\n",
 				__func__);
 
-	/* allocate one more mbuf */
+	/* allocate one more mbuf, it is attached to the same external buffer */
 	clone = rte_pktmbuf_clone(m, pktmbuf_pool);
 	if (clone == NULL)
 		GOTO_FAIL("%s: mbuf clone allocation failed!\n", __func__);
 	if (rte_pktmbuf_pkt_len(clone) != 0)
 		GOTO_FAIL("%s: Bad packet length\n", __func__);
 
-	/* attach the same external buffer to the cloned mbuf */
-	rte_pktmbuf_attach_extbuf(clone, ext_buf_addr, buf_iova, buf_len,
-			ret_shinfo);
-	if (clone->ol_flags != EXT_ATTACHED_MBUF)
+	if (clone->ol_flags != RTE_MBUF_F_EXTERNAL)
 		GOTO_FAIL("%s: External buffer is not attached to mbuf\n",
 				__func__);
 
@@ -2678,8 +2653,8 @@ test_mbuf_dyn(struct rte_mempool *pktmbuf_pool)
 			flag2, strerror(errno));
 
 	flag3 = rte_mbuf_dynflag_register_bitnum(&dynflag3,
-						rte_bsf64(PKT_LAST_FREE));
-	if (flag3 != rte_bsf64(PKT_LAST_FREE))
+						rte_bsf64(RTE_MBUF_F_LAST_FREE));
+	if ((uint32_t)flag3 != rte_bsf64(RTE_MBUF_F_LAST_FREE))
 		GOTO_FAIL("failed to register dynamic flag 3, flag3=%d: %s",
 			flag3, strerror(errno));
 
@@ -2744,6 +2719,7 @@ test_nb_segs_and_next_reset(void)
 
 	/* split m0 chain in two, between m1 and m2 */
 	m0->nb_segs = 2;
+	m0->pkt_len -= m2->data_len;
 	m1->next = NULL;
 	m2->nb_segs = 1;
 
@@ -2764,11 +2740,11 @@ test_nb_segs_and_next_reset(void)
 			m2->nb_segs != 1 || m2->next != NULL)
 		GOTO_FAIL("nb_segs or next was not reset properly");
 
+	rte_mempool_free(pool);
 	return 0;
 
 fail:
-	if (pool != NULL)
-		rte_mempool_free(pool);
+	rte_mempool_free(pool);
 	return -1;
 }
 

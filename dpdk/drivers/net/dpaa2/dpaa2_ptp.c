@@ -10,13 +10,13 @@
 #include <unistd.h>
 #include <stdarg.h>
 
-#include <rte_ethdev.h>
+#include <ethdev_driver.h>
 #include <rte_log.h>
 #include <rte_eth_ctrl.h>
 #include <rte_malloc.h>
 #include <rte_time.h>
 
-#include <rte_fslmc.h>
+#include <bus_fslmc_driver.h>
 #include <fsl_dprtc.h>
 #include <fsl_dpkg.h>
 
@@ -170,8 +170,7 @@ dpaa2_create_dprtc_device(int vdev_fd __rte_unused,
 	return 0;
 
 init_err:
-	if (dprtc_dev)
-		rte_free(dprtc_dev);
+	rte_free(dprtc_dev);
 
 	return -1;
 }

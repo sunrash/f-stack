@@ -1,9 +1,12 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2001-2020 Intel Corporation
+ * Copyright(c) 2001-2022 Intel Corporation
  */
 
 #ifndef _ICE_BITOPS_H_
 #define _ICE_BITOPS_H_
+
+#include "ice_defs.h"
+#include "ice_osdep.h"
 
 /* Define the size of the bitmap chunk */
 typedef u32 ice_bitmap_t;
@@ -13,7 +16,7 @@ typedef u32 ice_bitmap_t;
 /* Determine which chunk a bit belongs in */
 #define BIT_CHUNK(nr)		((nr) / BITS_PER_CHUNK)
 /* How many chunks are required to store this many bits */
-#define BITS_TO_CHUNKS(sz)	DIVIDE_AND_ROUND_UP((sz), BITS_PER_CHUNK)
+#define BITS_TO_CHUNKS(sz)	(((sz) + BITS_PER_CHUNK - 1) / BITS_PER_CHUNK)
 /* Which bit inside a chunk this bit corresponds to */
 #define BIT_IN_CHUNK(nr)	((nr) % BITS_PER_CHUNK)
 /* How many bits are valid in the last chunk, assumes nr > 0 */
@@ -408,10 +411,10 @@ ice_bitmap_set(ice_bitmap_t *dst, u16 pos, u16 num_bits)
  * Note that this function assumes it is operating on a bitmap declared using
  * ice_declare_bitmap.
  */
-static inline int
+static inline u16
 ice_bitmap_hweight(ice_bitmap_t *bm, u16 size)
 {
-	int count = 0;
+	u16 count = 0;
 	u16 bit = 0;
 
 	while (size > (bit = ice_find_next_bit(bm, size, bit))) {
@@ -447,6 +450,51 @@ ice_cmp_bitmap(ice_bitmap_t *bmp1, ice_bitmap_t *bmp2, u16 size)
 		return false;
 
 	return true;
+}
+
+/**
+ * ice_bitmap_from_array32 - copies u32 array source into bitmap destination
+ * @dst: the destination bitmap
+ * @src: the source u32 array
+ * @size: size of the bitmap (in bits)
+ *
+ * This function copies the src bitmap stored in an u32 array into the dst
+ * bitmap stored as an ice_bitmap_t.
+ */
+static inline void
+ice_bitmap_from_array32(ice_bitmap_t *dst, u32 *src, u16 size)
+{
+	u32 remaining_bits, i;
+
+#define BITS_PER_U32	(sizeof(u32) * BITS_PER_BYTE)
+	/* clear bitmap so we only have to set when iterating */
+	ice_zero_bitmap(dst, size);
+
+	for (i = 0; i < (u32)(size / BITS_PER_U32); i++) {
+		u32 bit_offset = i * BITS_PER_U32;
+		u32 entry = src[i];
+		u32 j;
+
+		for (j = 0; j < BITS_PER_U32; j++) {
+			if (entry & BIT(j))
+				ice_set_bit((u16)(j + bit_offset), dst);
+		}
+	}
+
+	/* still need to check the leftover bits (i.e. if size isn't evenly
+	 * divisible by BITS_PER_U32
+	 **/
+	remaining_bits = size % BITS_PER_U32;
+	if (remaining_bits) {
+		u32 bit_offset = i * BITS_PER_U32;
+		u32 entry = src[i];
+		u32 j;
+
+		for (j = 0; j < remaining_bits; j++) {
+			if (entry & BIT(j))
+				ice_set_bit((u16)(j + bit_offset), dst);
+		}
+	}
 }
 
 #endif /* _ICE_BITOPS_H_ */

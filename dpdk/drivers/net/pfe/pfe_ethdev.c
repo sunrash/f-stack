@@ -5,8 +5,8 @@
 #include <sys/ioctl.h>
 #include <sys/epoll.h>
 #include <rte_kvargs.h>
-#include <rte_ethdev_vdev.h>
-#include <rte_bus_vdev.h>
+#include <ethdev_vdev.h>
+#include <bus_vdev_driver.h>
 #include <rte_ether.h>
 #include <dpaa_of.h>
 
@@ -22,15 +22,15 @@ struct pfe_vdev_init_params {
 static struct pfe *g_pfe;
 /* Supported Rx offloads */
 static uint64_t dev_rx_offloads_sup =
-		DEV_RX_OFFLOAD_IPV4_CKSUM |
-		DEV_RX_OFFLOAD_UDP_CKSUM |
-		DEV_RX_OFFLOAD_TCP_CKSUM;
+		RTE_ETH_RX_OFFLOAD_IPV4_CKSUM |
+		RTE_ETH_RX_OFFLOAD_UDP_CKSUM |
+		RTE_ETH_RX_OFFLOAD_TCP_CKSUM;
 
 /* Supported Tx offloads */
 static uint64_t dev_tx_offloads_sup =
-		DEV_TX_OFFLOAD_IPV4_CKSUM |
-		DEV_TX_OFFLOAD_UDP_CKSUM |
-		DEV_TX_OFFLOAD_TCP_CKSUM;
+		RTE_ETH_TX_OFFLOAD_IPV4_CKSUM |
+		RTE_ETH_TX_OFFLOAD_UDP_CKSUM |
+		RTE_ETH_TX_OFFLOAD_TCP_CKSUM;
 
 /* TODO: make pfe_svr a runtime option.
  * Driver should be able to get the SVR
@@ -235,28 +235,13 @@ pfe_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 	return nb_pkts;
 }
 
-static uint16_t
-pfe_dummy_xmit_pkts(__rte_unused void *tx_queue,
-		__rte_unused struct rte_mbuf **tx_pkts,
-		__rte_unused uint16_t nb_pkts)
-{
-	return 0;
-}
-
-static uint16_t
-pfe_dummy_recv_pkts(__rte_unused void *rxq,
-		__rte_unused struct rte_mbuf **rx_pkts,
-		__rte_unused uint16_t nb_pkts)
-{
-	return 0;
-}
-
 static int
 pfe_eth_open(struct rte_eth_dev *dev)
 {
 	struct pfe_eth_priv_s *priv = dev->data->dev_private;
 	struct hif_client_s *client;
 	struct hif_shm *hif_shm;
+	uint16_t i;
 	int rc;
 
 	/* Register client driver with HIF */
@@ -334,6 +319,10 @@ pfe_eth_open(struct rte_eth_dev *dev)
 		PFE_PMD_INFO("PFE INTERRUPT Mode enabled");
 	}
 
+	for (i = 0; i < dev->data->nb_rx_queues; i++)
+		dev->data->rx_queue_state[i] = RTE_ETH_QUEUE_STATE_STARTED;
+	for (i = 0; i < dev->data->nb_tx_queues; i++)
+		dev->data->tx_queue_state[i] = RTE_ETH_QUEUE_STATE_STARTED;
 
 err0:
 	return rc;
@@ -377,14 +366,20 @@ static int
 pfe_eth_stop(struct rte_eth_dev *dev/*, int wake*/)
 {
 	struct pfe_eth_priv_s *priv = dev->data->dev_private;
+	uint16_t i;
 
 	dev->data->dev_started = 0;
 
 	gemac_disable(priv->EMAC_baseaddr);
 	gpi_disable(priv->GPI_baseaddr);
 
-	dev->rx_pkt_burst = &pfe_dummy_recv_pkts;
-	dev->tx_pkt_burst = &pfe_dummy_xmit_pkts;
+	dev->rx_pkt_burst = rte_eth_pkt_burst_dummy;
+	dev->tx_pkt_burst = rte_eth_pkt_burst_dummy;
+
+	for (i = 0; i < dev->data->nb_rx_queues; i++)
+		dev->data->rx_queue_state[i] = RTE_ETH_QUEUE_STATE_STOPPED;
+	for (i = 0; i < dev->data->nb_tx_queues; i++)
+		dev->data->tx_queue_state[i] = RTE_ETH_QUEUE_STATE_STOPPED;
 
 	return 0;
 }
@@ -494,18 +489,6 @@ pfe_rx_queue_setup(struct rte_eth_dev *dev, uint16_t queue_idx,
 	return 0;
 }
 
-static void
-pfe_rx_queue_release(void *q __rte_unused)
-{
-	PMD_INIT_FUNC_TRACE();
-}
-
-static void
-pfe_tx_queue_release(void *q __rte_unused)
-{
-	PMD_INIT_FUNC_TRACE();
-}
-
 static int
 pfe_tx_queue_setup(struct rte_eth_dev *dev,
 		   uint16_t queue_idx,
@@ -537,7 +520,8 @@ pfe_supported_ptypes_get(struct rte_eth_dev *dev)
 		RTE_PTYPE_L3_IPV6_EXT,
 		RTE_PTYPE_L4_TCP,
 		RTE_PTYPE_L4_UDP,
-		RTE_PTYPE_L4_SCTP
+		RTE_PTYPE_L4_SCTP,
+		RTE_PTYPE_UNKNOWN
 	};
 
 	if (dev->rx_pkt_burst == pfe_recv_pkts ||
@@ -599,8 +583,7 @@ pfe_eth_link_update(struct rte_eth_dev *dev, int wait_to_complete __rte_unused)
 		ret = ioctl(priv->link_fd, ioctl_cmd, &lstatus);
 		if (ret != 0) {
 			PFE_PMD_ERR("Unable to fetch link status (ioctl)\n");
-			/* use dummy link value */
-			link.link_status = 1;
+			return -1;
 		}
 		PFE_PMD_DEBUG("Fetched link state (%d) for dev %d.\n",
 			      lstatus, priv->id);
@@ -613,9 +596,9 @@ pfe_eth_link_update(struct rte_eth_dev *dev, int wait_to_complete __rte_unused)
 	}
 
 	link.link_status = lstatus;
-	link.link_speed = ETH_LINK_SPEED_1G;
-	link.link_duplex = ETH_LINK_FULL_DUPLEX;
-	link.link_autoneg = ETH_LINK_AUTONEG;
+	link.link_speed = RTE_ETH_LINK_SPEED_1G;
+	link.link_duplex = RTE_ETH_LINK_FULL_DUPLEX;
+	link.link_autoneg = RTE_ETH_LINK_AUTONEG;
 
 	pfe_eth_atomic_write_link_status(dev, &link);
 
@@ -682,16 +665,11 @@ pfe_link_up(struct rte_eth_dev *dev)
 static int
 pfe_mtu_set(struct rte_eth_dev *dev, uint16_t mtu)
 {
-	int ret;
 	struct pfe_eth_priv_s *priv = dev->data->dev_private;
 	uint16_t frame_size = mtu + RTE_ETHER_HDR_LEN + RTE_ETHER_CRC_LEN;
 
 	/*TODO Support VLAN*/
-	ret = gemac_set_rx(priv->EMAC_baseaddr, frame_size);
-	if (!ret)
-		dev->data->mtu = mtu;
-
-	return ret;
+	return gemac_set_rx(priv->EMAC_baseaddr, frame_size);
 }
 
 /* pfe_eth_enet_addr_byte_mac
@@ -759,9 +737,7 @@ static const struct eth_dev_ops ops = {
 	.dev_configure = pfe_eth_configure,
 	.dev_infos_get = pfe_eth_info,
 	.rx_queue_setup = pfe_rx_queue_setup,
-	.rx_queue_release  = pfe_rx_queue_release,
 	.tx_queue_setup = pfe_tx_queue_setup,
-	.tx_queue_release  = pfe_tx_queue_release,
 	.dev_supported_ptypes_get = pfe_supported_ptypes_get,
 	.link_update  = pfe_eth_link_update,
 	.promiscuous_enable   = pfe_promiscuous_enable,
@@ -1170,4 +1146,4 @@ struct rte_vdev_driver pmd_pfe_drv = {
 
 RTE_PMD_REGISTER_VDEV(PFE_NAME_PMD, pmd_pfe_drv);
 RTE_PMD_REGISTER_PARAM_STRING(PFE_NAME_PMD, PFE_VDEV_GEM_ID_ARG "=<int> ");
-RTE_LOG_REGISTER(pfe_logtype_pmd, pmd.net.pfe, NOTICE);
+RTE_LOG_REGISTER_DEFAULT(pfe_logtype_pmd, NOTICE);

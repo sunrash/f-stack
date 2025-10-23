@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause
  *
- * Copyright(c) 2019-2020 Xilinx, Inc.
+ * Copyright(c) 2019-2021 Xilinx, Inc.
  * Copyright(c) 2018-2019 Solarflare Communications Inc.
  */
 
@@ -39,6 +39,10 @@ rhead_board_cfg(
 	encp->enc_tunnel_config_udp_entries_max = EFX_TUNNEL_MAXNENTRIES;
 
 	encp->enc_clk_mult = 1; /* not used for Riverhead */
+
+	EFX_STATIC_ASSERT(MC_CMD_INIT_RXQ_V4_IN_BUFFER_SIZE_BYTES_LEN == 4);
+	/* Agrees with MC_CMD_INIT_RXQ_V4_IN_BUFFER_SIZE_BYTES_LEN */
+	encp->enc_rx_dma_desc_size_max = UINT32_MAX;
 
 	/*
 	 * FIXME There are TxSend and TxSeg descriptors on Riverhead.

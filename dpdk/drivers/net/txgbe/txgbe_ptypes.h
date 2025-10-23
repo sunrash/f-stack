@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2015-2020
+ * Copyright(c) 2015-2020 Beijing WangXun Technology Co., Ltd.
  */
 
 #ifndef _TXGBE_PTYPE_H_
@@ -346,6 +346,11 @@ struct txgbe_nvgrehdr {
 	__be16 flags;
 	__be16 proto;
 	__be32 tni;
+};
+
+struct txgbe_grehdr {
+	__be16 flags;
+	__be16 proto;
 };
 
 #endif /* _TXGBE_PTYPE_H_ */

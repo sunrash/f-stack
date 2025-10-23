@@ -43,7 +43,7 @@ Features and Limitations of virtio PMD
 In this release, the virtio PMD provides the basic functionality of packet reception and transmission.
 
 *   It supports merge-able buffers per packet when receiving packets and scattered buffer per packet
-    when transmitting packets. The packet size supported is from 64 to 1518.
+    when transmitting packets. The packet size supported is from 64 to 9728.
 
 *   It supports multicast packets and promiscuous mode.
 
@@ -73,6 +73,9 @@ In this release, the virtio PMD provides the basic functionality of packet recep
 
 *   Virtio supports using port IO to get PCI resource when UIO module is not available.
 
+*   Virtio supports RSS Rx mode with 40B configurable hash key length, 128
+    configurable RETA entries and configurable hash types.
+
 Prerequisites
 -------------
 
@@ -82,6 +85,9 @@ The following prerequisites apply:
 
 *   Linux kernel with KVM module; vhost module loaded and ioeventfd supported.
     Qemu standard backend without vhost support isn't tested, and probably isn't supported.
+
+*   When using legacy interface, ``SYS_RAWIO`` capability is required
+    for ``iopl()`` call to enable access to PCI I/O ports.
 
 Virtio with kni vhost Back End
 ------------------------------
@@ -153,7 +159,7 @@ Host2VM communication example
     .. code-block:: console
 
         modprobe uio
-        echo 512 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
+        dpdk-hugepages.py --setup 1G
         modprobe uio_pci_generic
         ./usertools/dpdk-devbind.py -b uio_pci_generic 00:03.0
 
@@ -267,7 +273,7 @@ There is no vector callbacks for packed virtqueue for now.
 Example of using the vector version of the virtio poll mode driver in
 ``testpmd``::
 
-   testpmd -l 0-2 -n 4 -- -i --rxq=1 --txq=1 --nb-cores=1
+   dpdk-testpmd -l 0-2 -n 4 -- -i --rxq=1 --txq=1 --nb-cores=1
 
 In-order callbacks only work on simulated virtio user vdev.
 
@@ -301,6 +307,7 @@ Prerequisites for Rx interrupts
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 To support Rx interrupts,
+
 #. Check if guest kernel supports VFIO-NOIOMMU:
 
     Linux started to support VFIO-NOIOMMU since 4.8.0. Make sure the guest
@@ -463,12 +470,16 @@ according to below configuration:
 
 #. Split virtqueue mergeable path: If Rx mergeable is negotiated, in-order feature is
    not negotiated, this path will be selected.
+
 #. Split virtqueue non-mergeable path: If Rx mergeable and in-order feature are not
    negotiated, also Rx offload(s) are requested, this path will be selected.
+
 #. Split virtqueue in-order mergeable path: If Rx mergeable and in-order feature are
    both negotiated, this path will be selected.
+
 #. Split virtqueue in-order non-mergeable path: If in-order feature is negotiated and
    Rx mergeable is not negotiated, this path will be selected.
+
 #. Split virtqueue vectorized Rx path: If Rx mergeable is disabled and no Rx offload
    requested, this path will be selected.
 
@@ -477,18 +488,23 @@ according to below configuration:
 
 #. Packed virtqueue mergeable path: If Rx mergeable is negotiated, in-order feature
    is not negotiated, this path will be selected.
+
 #. Packed virtqueue non-mergeable path: If Rx mergeable and in-order feature are not
    negotiated, this path will be selected.
+
 #. Packed virtqueue in-order mergeable path: If in-order and Rx mergeable feature are
    both negotiated, this path will be selected.
+
 #. Packed virtqueue in-order non-mergeable path: If in-order feature is negotiated and
    Rx mergeable is not negotiated, this path will be selected.
+
 #. Packed virtqueue vectorized Rx path: If building and running environment support
-   AVX512 && in-order feature is negotiated && Rx mergeable is not negotiated &&
-   TCP_LRO Rx offloading is disabled && vectorized option enabled,
+   (AVX512 || NEON) && in-order feature is negotiated && Rx mergeable
+   is not negotiated && TCP_LRO Rx offloading is disabled && vectorized option enabled,
    this path will be selected.
+
 #. Packed virtqueue vectorized Tx path: If building and running environment support
-   AVX512 && in-order feature is negotiated && vectorized option enabled,
+   (AVX512 || NEON)  && in-order feature is negotiated && vectorized option enabled,
    this path will be selected.
 
 Rx/Tx callbacks of each Virtio path
@@ -564,5 +580,7 @@ or configuration, below steps can help you identify which path you selected and
 root cause faster.
 
 #. Run vhost/virtio test case;
+
 #. Run "perf top" and check virtio Rx/Tx callback names;
+
 #. Identify which virtio path is selected refer to above table.

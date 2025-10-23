@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2015-2020
+ * Copyright(c) 2015-2020 Beijing WangXun Technology Co., Ltd.
+ * Copyright(c) 2010-2017 Intel Corporation
  */
 
 /**
@@ -11,7 +12,6 @@
 #ifndef _PMD_TXGBE_H_
 #define _PMD_TXGBE_H_
 
-#include <rte_compat.h>
 #include <rte_ethdev.h>
 #include <rte_ether.h>
 

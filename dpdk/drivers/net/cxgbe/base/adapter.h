@@ -8,11 +8,11 @@
 #ifndef __T4_ADAPTER_H__
 #define __T4_ADAPTER_H__
 
-#include <rte_bus_pci.h>
+#include <bus_pci_driver.h>
 #include <rte_mbuf.h>
 #include <rte_io.h>
 #include <rte_rwlock.h>
-#include <rte_ethdev.h>
+#include <ethdev_driver.h>
 
 #include "../cxgbe_compat.h"
 #include "../cxgbe_ofld.h"
@@ -39,9 +39,6 @@ struct port_info {
 	short int xact_addr_filt;       /* index of exact MAC address filter */
 
 	u16    viid;                    /* associated virtual interface id */
-	s8     mdio_addr;               /* address of the PHY */
-	u8     port_type;               /* firmware port type */
-	u8     mod_type;                /* firmware module type */
 	u8     port_id;                 /* physical port ID */
 	u8     pidx;			/* port index for this PF */
 	u8     tx_chan;                 /* associated channel */
@@ -61,13 +58,10 @@ struct port_info {
 	 */
 	u8 vin;
 	u8 vivld;
-};
 
-/* Enable or disable autonegotiation.  If this is set to enable,
- * the forced link modes above are completely ignored.
- */
-#define AUTONEG_DISABLE         0x00
-#define AUTONEG_ENABLE          0x01
+	u8 vi_en_rx; /* Enable/disable VI Rx */
+	u8 vi_en_tx; /* Enable/disable VI Tx */
+};
 
 enum {                                 /* adapter flags */
 	FULL_INIT_DONE     = (1 << 0),
@@ -104,6 +98,7 @@ struct sge_fl {                     /* SGE free-buffer queue state */
 
 	unsigned long alloc_failed; /* # of times buffer allocation failed */
 	unsigned long low;          /* # of times momentarily starving */
+	u8 fl_buf_size_idx;         /* Selected SGE_FL_BUFFER_SIZE index */
 };
 
 #define MAX_MBUF_FRAGS (16384 / 512 + 2)
@@ -116,7 +111,6 @@ struct pkt_gl {
 	void *va;                         /* virtual address of first byte */
 	unsigned int nfrags;              /* # of fragments */
 	unsigned int tot_len;             /* total length of fragments */
-	bool usembufs;                    /* use mbufs for fragments */
 };
 
 typedef int (*rspq_handler_t)(struct sge_rspq *q, const __be64 *rsp,
@@ -166,7 +160,6 @@ struct sge_eth_rxq {                /* a SW Ethernet Rx queue */
 	struct sge_rspq rspq;
 	struct sge_fl fl;
 	struct sge_eth_rx_stats stats;
-	bool usembufs;               /* one ingress packet per mbuf FL buffer */
 } __rte_cache_aligned;
 
 /*
@@ -292,9 +285,8 @@ struct sge {
 	u16 timer_val[SGE_NTIMERS];
 	u8  counter_val[SGE_NCOUNTERS];
 
-	u32 fl_align;               /* response queue message alignment */
-	u32 fl_pg_order;            /* large page allocation size */
 	u32 fl_starve_thres;        /* Free List starvation threshold */
+	u32 fl_buffer_size[SGE_FL_BUFFER_SIZE_NUM]; /* Free List buffer sizes */
 };
 
 /*
@@ -799,7 +791,7 @@ void t4_free_mem(void *addr);
 #define t4_os_free(_ptr)       t4_free_mem((_ptr))
 
 void t4_os_portmod_changed(const struct adapter *adap, int port_id);
-void t4_os_link_changed(struct adapter *adap, int port_id, int link_stat);
+void t4_os_link_changed(struct adapter *adap, int port_id);
 
 void reclaim_completed_tx(struct sge_txq *q);
 void t4_free_sge_resources(struct adapter *adap);

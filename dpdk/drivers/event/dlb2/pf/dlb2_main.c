@@ -13,9 +13,10 @@
 #include <rte_malloc.h>
 #include <rte_errno.h>
 
+#include "base/dlb2_regs.h"
+#include "base/dlb2_hw_types.h"
 #include "base/dlb2_resource.h"
 #include "base/dlb2_osdep.h"
-#include "base/dlb2_regs.h"
 #include "dlb2_main.h"
 #include "../dlb2_user.h"
 #include "../dlb2_priv.h"
@@ -25,6 +26,7 @@
 #define PF_ID_ZERO 0	/* PF ONLY! */
 #define NO_OWNER_VF 0	/* PF ONLY! */
 #define NOT_VF_REQ false /* PF ONLY! */
+#define DLB2_PCI_PASID_CAP_OFFSET        0x148   /* PASID capability offset */
 
 #define DLB2_PCI_CAP_POINTER 0x34
 #define DLB2_PCI_CAP_NEXT(hdr) (((hdr) >> 8) & 0xFC)
@@ -45,6 +47,7 @@
 #define DLB2_PCI_CAP_ID_MSIX      0x11
 #define DLB2_PCI_EXT_CAP_ID_PRI   0x13
 #define DLB2_PCI_EXT_CAP_ID_ACS   0xD
+#define DLB2_PCI_EXT_CAP_ID_PASID 0x1B	/* Process Address Space ID */
 
 #define DLB2_PCI_PRI_CTRL_ENABLE         0x1
 #define DLB2_PCI_PRI_ALLOC_REQ           0xC
@@ -63,6 +66,8 @@
 #define DLB2_PCI_ACS_CR                  0x8
 #define DLB2_PCI_ACS_UF                  0x10
 #define DLB2_PCI_ACS_EC                  0x20
+#define DLB2_PCI_PASID_CTRL              0x06    /* PASID control register */
+#define DLB2_PCI_PASID_CAP_OFFSET        0x148   /* PASID capability offset */
 
 static int dlb2_pci_find_capability(struct rte_pci_device *pdev, uint32_t id)
 {
@@ -103,25 +108,34 @@ dlb2_pf_init_driver_state(struct dlb2_dev *dlb2_dev)
 
 static void dlb2_pf_enable_pm(struct dlb2_dev *dlb2_dev)
 {
-	dlb2_clr_pmcsr_disable(&dlb2_dev->hw);
+	int version;
+	version = DLB2_HW_DEVICE_FROM_PCI_ID(dlb2_dev->pdev);
+
+	dlb2_clr_pmcsr_disable(&dlb2_dev->hw, version);
 }
 
 #define DLB2_READY_RETRY_LIMIT 1000
-static int dlb2_pf_wait_for_device_ready(struct dlb2_dev *dlb2_dev)
+static int dlb2_pf_wait_for_device_ready(struct dlb2_dev *dlb2_dev,
+					 int dlb_version)
 {
 	u32 retries = 0;
 
 	/* Allow at least 1s for the device to become active after power-on */
 	for (retries = 0; retries < DLB2_READY_RETRY_LIMIT; retries++) {
-		union dlb2_cfg_mstr_cfg_diagnostic_idle_status idle;
-		union dlb2_cfg_mstr_cfg_pm_status pm_st;
+		u32 idle_val;
+		u32 idle_dlb_func_idle;
+		u32 pm_st_val;
+		u32 pm_st_pmsm;
 		u32 addr;
 
-		addr = DLB2_CFG_MSTR_CFG_PM_STATUS;
-		pm_st.val = DLB2_CSR_RD(&dlb2_dev->hw, addr);
-		addr = DLB2_CFG_MSTR_CFG_DIAGNOSTIC_IDLE_STATUS;
-		idle.val = DLB2_CSR_RD(&dlb2_dev->hw, addr);
-		if (pm_st.field.pmsm == 1 && idle.field.dlb_func_idle == 1)
+		addr = DLB2_CM_CFG_PM_STATUS(dlb_version);
+		pm_st_val = DLB2_CSR_RD(&dlb2_dev->hw, addr);
+		addr = DLB2_CM_CFG_DIAGNOSTIC_IDLE_STATUS(dlb_version);
+		idle_val = DLB2_CSR_RD(&dlb2_dev->hw, addr);
+		idle_dlb_func_idle = idle_val &
+			DLB2_CM_CFG_DIAGNOSTIC_IDLE_STATUS_DLB_FUNC_IDLE;
+		pm_st_pmsm = pm_st_val & DLB2_CM_CFG_PM_STATUS_PMSM;
+		if (pm_st_pmsm && idle_dlb_func_idle)
 			break;
 
 		rte_delay_ms(1);
@@ -137,10 +151,11 @@ static int dlb2_pf_wait_for_device_ready(struct dlb2_dev *dlb2_dev)
 }
 
 struct dlb2_dev *
-dlb2_probe(struct rte_pci_device *pdev)
+dlb2_probe(struct rte_pci_device *pdev, const void *probe_args)
 {
 	struct dlb2_dev *dlb2_dev;
 	int ret = 0;
+	int dlb_version = 0;
 
 	DLB2_INFO(dlb2_dev, "probe\n");
 
@@ -151,6 +166,8 @@ dlb2_probe(struct rte_pci_device *pdev)
 		ret = -ENOMEM;
 		goto dlb2_dev_malloc_fail;
 	}
+
+	dlb_version = DLB2_HW_DEVICE_FROM_PCI_ID(pdev);
 
 	/* PCI Bus driver has already mapped bar space into process.
 	 * Save off our IO register and FUNC addresses.
@@ -191,9 +208,13 @@ dlb2_probe(struct rte_pci_device *pdev)
 	 */
 	dlb2_pf_enable_pm(dlb2_dev);
 
-	ret = dlb2_pf_wait_for_device_ready(dlb2_dev);
+	ret = dlb2_pf_wait_for_device_ready(dlb2_dev, dlb_version);
 	if (ret)
 		goto wait_for_device_ready_fail;
+
+	ret = dlb2_resource_probe(&dlb2_dev->hw, probe_args);
+	if (ret)
+		goto resource_probe_fail;
 
 	ret = dlb2_pf_reset(dlb2_dev);
 	if (ret)
@@ -203,7 +224,7 @@ dlb2_probe(struct rte_pci_device *pdev)
 	if (ret)
 		goto init_driver_state_fail;
 
-	ret = dlb2_resource_init(&dlb2_dev->hw);
+	ret = dlb2_resource_init(&dlb2_dev->hw, dlb_version, probe_args);
 	if (ret)
 		goto resource_init_fail;
 
@@ -214,6 +235,7 @@ resource_init_fail:
 init_driver_state_fail:
 dlb2_reset_fail:
 pci_mmap_bad_addr:
+resource_probe_fail:
 wait_for_device_ready_fail:
 	rte_free(dlb2_dev);
 dlb2_dev_malloc_fail:
@@ -239,12 +261,14 @@ dlb2_pf_reset(struct dlb2_dev *dlb2_dev)
 	uint16_t rt_ctl_word;
 	uint32_t pri_reqs_dword;
 	uint16_t pri_ctrl_word;
+	uint16_t pasid_ctrl;
 
 	int pcie_cap_offset;
 	int pri_cap_offset;
 	int msix_cap_offset;
 	int err_cap_offset;
 	int acs_cap_offset;
+	int pasid_cap_offset;
 	int wait_count;
 
 	uint16_t devsta_busy_word;
@@ -562,6 +586,38 @@ dlb2_pf_reset(struct dlb2_dev *dlb2_dev)
 				__func__, (int)off);
 			return ret;
 		}
+	}
+
+	/* The current Linux kernel vfio driver does not expose PASID capability to
+	 * users. It also enables PASID by default, which breaks DLB PF PMD. We have
+	 * to use the hardcoded offset for now to disable PASID.
+	 */
+	pasid_cap_offset = DLB2_PCI_PASID_CAP_OFFSET;
+
+	off = pasid_cap_offset + DLB2_PCI_PASID_CTRL;
+	if (rte_pci_read_config(pdev, &pasid_ctrl, 2, off) != 2)
+		pasid_ctrl = 0;
+
+	if (pasid_ctrl) {
+		DLB2_INFO(dlb2_dev, "DLB2 disabling pasid...\n");
+
+		pasid_ctrl = 0;
+		ret = rte_pci_write_config(pdev, &pasid_ctrl, 2, off);
+		if (ret != 2) {
+			DLB2_LOG_ERR("[%s()] failed to write the pcie config space at offset %d\n",
+				__func__, (int)off);
+			return ret;
+		}
+	}
+
+	/* Disable PASID if it is enabled by default, which
+	 * breaks the DLB if enabled.
+	 */
+	off = DLB2_PCI_PASID_CAP_OFFSET + RTE_PCI_PASID_CTRL;
+	if (rte_pci_pasid_set_state(pdev, off, false)) {
+		DLB2_LOG_ERR("[%s()] failed to write the pcie config space at offset %d\n",
+				__func__, (int)off);
+		return -1;
 	}
 
 	return 0;

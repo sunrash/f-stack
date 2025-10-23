@@ -16,7 +16,7 @@
 
 #include <rte_byteorder.h>
 #include <rte_spinlock.h>
-#include <rte_bus_pci.h>
+#include <bus_pci_driver.h>
 #include <rte_io.h>
 
 #include "bnx2x_osal.h"
@@ -81,7 +81,7 @@
 #endif
 
 #ifndef ARRAY_SIZE
-#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
+#define ARRAY_SIZE(arr) RTE_DIM(arr)
 #endif
 #ifndef DIV_ROUND_UP
 #define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))

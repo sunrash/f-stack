@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: (BSD-3-Clause OR GPL-2.0)
- * Copyright(c) 2018-2019 Pensando Systems, Inc. All rights reserved.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright 2018-2022 Advanced Micro Devices, Inc.
  */
 
 #ifndef _IONIC_REGS_H_
@@ -20,9 +20,6 @@ struct ionic_intr {
 	uint32_t coal;
 	uint32_t rsvd[3];
 };
-
-#define IONIC_INTR_CTRL_REGS_MAX	2048
-#define IONIC_INTR_CTRL_COAL_MAX	0x3F
 
 /** enum ionic_intr_mask_vals - valid values for mask and mask_assert.
  * @IONIC_INTR_MASK_CLEAR:	unmask interrupt.
@@ -132,11 +129,5 @@ enum ionic_dbell_bits {
 
 	IONIC_DBELL_INDEX_MASK		= 0xffff,
 };
-
-static inline void
-ionic_dbell_ring(u64 __iomem *db_page, int qtype, u64 val)
-{
-	writeq(val, &db_page[qtype]);
-}
 
 #endif /* _IONIC_REGS_H_ */

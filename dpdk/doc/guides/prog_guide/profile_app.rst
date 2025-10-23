@@ -42,7 +42,7 @@ and recompile the DPDK:
 
 .. code-block:: console
 
-   meson build
+   meson setup build
    meson configure build -Dc_args=-DRTE_ETHDEV_PROFILE_WITH_VTUNE
    ninja -C build
 
@@ -59,7 +59,7 @@ addition to the standard events, ``perf`` can be used to profile arm64
 specific PMU (Performance Monitor Unit) events through raw events (``-e``
 ``-rXX``).
 
-For more derails refer to the
+For more details refer to the
 `ARM64 specific PMU events enumeration <http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.100095_0002_04_en/way1382543438508.html>`_.
 
 
@@ -94,7 +94,16 @@ an ARMv8 machine.
     make
     sudo insmod pmu_el0_cycle_counter.ko
 
-Please refer to :doc:`../linux_gsg/build_dpdk` for details on compiling DPDK with meson.
+Please refer to :doc:`../linux_gsg/build_dpdk` for generic details on compiling DPDK with meson.
+
+In order to enable ``PMU`` based ``rte_rdtsc()``, user needs to configure the
+build with ``-Dc_args='-DRTE_ARM_EAL_RDTSC_USE_PMU'``.
+
+Example:
+
+.. code-block:: console
+
+   meson setup --cross config/arm/arm64_armv8_linux_gcc -Dc_args='-DRTE_ARM_EAL_RDTSC_USE_PMU' build
 
 .. warning::
 

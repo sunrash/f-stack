@@ -19,7 +19,6 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <inttypes.h>
-#include <arpa/inet.h>
 
 #include <rte_common.h>
 #include <rte_byteorder.h>
@@ -31,11 +30,9 @@
 #include <rte_eal.h>
 #include <rte_per_lcore.h>
 #include <rte_lcore.h>
-#include <rte_atomic.h>
 #include <rte_branch_prediction.h>
 #include <rte_mempool.h>
 #include <rte_interrupts.h>
-#include <rte_pci.h>
 #include <rte_ether.h>
 #include <rte_ethdev.h>
 #include <rte_string_fns.h>
@@ -59,6 +56,13 @@ usage(char* progname)
 	       "(only if interactive is disabled).\n");
 	printf("  --stats-period=PERIOD: statistics will be shown "
 	       "every PERIOD seconds (only if interactive is disabled).\n");
+	printf("  --display-xstats xstat_name1[,...]: comma-separated list of "
+	       "extended statistics to show. Used with --stats-period "
+	       "specified or interactive commands that show Rx/Tx statistics "
+	       "(i.e. 'show port stats').\n");
+	printf("  --num-procs=N: set the total number of multi-process instances.\n");
+	printf("  --proc-id=id: set the id of the current process from "
+	       "multi-process instances (0 <= id < num-procs).\n");
 	printf("  --nb-cores=N: set the number of forwarding cores "
 	       "(1 <= N <= %d).\n", nb_lcores);
 	printf("  --nb-ports=N: set the number of forwarding ports "
@@ -84,7 +88,8 @@ usage(char* progname)
 	       "in NUMA mode.\n");
 	printf("  --mbuf-size=N,[N1[,..Nn]: set the data size of mbuf to "
 	       "N bytes. If multiple numbers are specified the extra pools "
-	       "will be created to receive with packet split features\n");
+	       "will be created to receive packets based on the features "
+	       "supported, like packet split, multi-rx-mempool.\n");
 	printf("  --total-num-mbufs=N: set the number of mbufs to be allocated "
 	       "in mbuf pools.\n");
 	printf("  --max-pkt-len=N: set the maximum size of packet to N bytes.\n");
@@ -95,21 +100,6 @@ usage(char* progname)
 	       "of peer ports.\n");
 	printf("  --eth-peer=X,M:M:M:M:M:M: set the MAC address of the X peer "
 	       "port (0 <= X < %d).\n", RTE_MAX_ETHPORTS);
-#endif
-	printf("  --pkt-filter-mode=N: set Flow Director mode "
-	       "(N: none (default mode) or signature or perfect).\n");
-	printf("  --pkt-filter-report-hash=N: set Flow Director report mode "
-	       "(N: none  or match (default) or always).\n");
-	printf("  --pkt-filter-size=N: set Flow Director mode "
-	       "(N: 64K (default mode) or 128K or 256K).\n");
-	printf("  --pkt-filter-drop-queue=N: set drop-queue. "
-	       "In perfect mode, when you add a rule with queue = -1 "
-	       "the packet will be enqueued into the rx drop-queue. "
-	       "If the drop-queue doesn't exist, the packet is dropped. "
-	       "By default drop-queue=127.\n");
-#ifdef RTE_LIB_LATENCYSTATS
-	printf("  --latencystats=N: enable latency and jitter statistics "
-	       "monitoring on forwarding lcore id N.\n");
 #endif
 	printf("  --disable-crc-strip: disable CRC stripping by hardware.\n");
 	printf("  --enable-scatter: enable scattered Rx.\n");
@@ -140,6 +130,8 @@ usage(char* progname)
 	printf("  --hairpinq=N: set the number of hairpin queues per port to "
 	       "N.\n");
 	printf("  --burst=N: set the number of packets per burst to N.\n");
+	printf("  --flowgen-clones=N: set the number of single packet clones to send in flowgen mode. Should be less than burst value.\n");
+	printf("  --flowgen-flows=N: set the number of flows in flowgen mode to N (1 <= N <= INT32_MAX).\n");
 	printf("  --mbcache=N: set the cache of mbuf memory pool to N.\n");
 	printf("  --rxpt=N: set prefetch threshold register of RX rings to N.\n");
 	printf("  --rxht=N: set the host threshold register of RX rings to N.\n");
@@ -157,21 +149,31 @@ usage(char* progname)
 	       " Used mainly with PCAP drivers.\n");
 	printf("  --rxoffs=X[,Y]*: set RX segment offsets for split.\n");
 	printf("  --rxpkts=X[,Y]*: set RX segment sizes to split.\n");
+	printf("  --rxhdrs=eth[,ipv4]*: set RX segment protocol to split.\n");
 	printf("  --txpkts=X[,Y]*: set TX segment sizes"
 		" or total packet length.\n");
+	printf("  --multi-rx-mempool: enable multi-rx-mempool support\n");
 	printf("  --txonly-multi-flow: generate multiple flows in txonly mode\n");
 	printf("  --tx-ip=src,dst: IP addresses in Tx-only mode\n");
 	printf("  --tx-udp=src[,dst]: UDP ports in Tx-only mode\n");
+	printf("  --eth-link-speed: force link speed.\n");
+	printf("  --rxq-share=X: number of ports per shared Rx queue groups, defaults to UINT32_MAX (1 group)\n");
 	printf("  --disable-link-check: disable check on link status when "
 	       "starting/stopping ports.\n");
 	printf("  --disable-device-start: do not automatically start port\n");
 	printf("  --no-lsc-interrupt: disable link status change interrupt.\n");
 	printf("  --no-rmv-interrupt: disable device removal interrupt.\n");
+#ifdef RTE_LIB_BITRATESTATS
 	printf("  --bitrate-stats=N: set the logical core N to perform "
 		"bit-rate calculation.\n");
-	printf("  --print-event <unknown|intr_lsc|queue_state|intr_reset|vf_mbox|macsec|intr_rmv|flow_aged|all>: "
+#endif
+#ifdef RTE_LIB_LATENCYSTATS
+	printf("  --latencystats=N: enable latency and jitter statistics "
+	       "monitoring on forwarding lcore id N.\n");
+#endif
+	printf("  --print-event <unknown|intr_lsc|queue_state|intr_reset|vf_mbox|macsec|intr_rmv|flow_aged|err_recovering|recovery_success|recovery_failed|all>: "
 	       "enable print of designated event or all of them.\n");
-	printf("  --mask-event <unknown|intr_lsc|queue_state|intr_reset|vf_mbox|macsec|intr_rmv|flow_aged|all>: "
+	printf("  --mask-event <unknown|intr_lsc|queue_state|intr_reset|vf_mbox|macsec|intr_rmv|flow_aged|err_recovering|recovery_success|recovery_failed||all>: "
 	       "disable print of designated event or all of them.\n");
 	printf("  --flow-isolate-all: "
 	       "requests flow API isolated mode on all ports at initialization time.\n");
@@ -180,8 +182,10 @@ usage(char* progname)
 	printf("  --hot-plug: enable hot plug for device.\n");
 	printf("  --vxlan-gpe-port=N: UPD port of tunnel VXLAN-GPE\n");
 	printf("  --geneve-parsed-port=N: UPD port to parse GENEVE tunnel protocol\n");
+#ifndef RTE_EXEC_ENV_WINDOWS
 	printf("  --mlockall: lock all memory\n");
 	printf("  --no-mlockall: do not lock all memory\n");
+#endif
 	printf("  --mp-alloc <native|anon|xmem|xmemhuge>: mempool allocation method.\n"
 	       "    native: use regular DPDK memory to create and populate mempool\n"
 	       "    anon: use regular DPDK memory to create and anonymous memory to populate mempool\n"
@@ -206,7 +210,7 @@ usage(char* progname)
 
 #ifdef RTE_LIB_CMDLINE
 static int
-init_peer_eth_addrs(char *config_filename)
+init_peer_eth_addrs(const char *config_filename)
 {
 	FILE *config_file;
 	portid_t i;
@@ -224,7 +228,8 @@ init_peer_eth_addrs(char *config_filename)
 			break;
 
 		if (rte_ether_unformat_addr(buf, &peer_eth_addrs[i]) < 0) {
-			printf("Bad MAC address format on line %d\n", i+1);
+			fprintf(stderr, "Bad MAC address format on line %d\n",
+				i + 1);
 			fclose(config_file);
 			return -1;
 		}
@@ -278,10 +283,10 @@ print_invalid_socket_id_error(void)
 {
 	unsigned int i = 0;
 
-	printf("Invalid socket id, options are: ");
+	fprintf(stderr, "Invalid socket id, options are: ");
 	for (i = 0; i < num_sockets; i++) {
-		printf("%u%s", socket_ids[i],
-		      (i == num_sockets - 1) ? "\n" : ",");
+		fprintf(stderr, "%u%s", socket_ids[i],
+			(i == num_sockets - 1) ? "\n" : ",");
 	}
 }
 
@@ -397,7 +402,8 @@ parse_ringnuma_config(const char *q_arg)
 		}
 		ring_flag = (uint8_t)int_fld[FLD_FLAG];
 		if ((ring_flag < RX_RING_ONLY) || (ring_flag > RXTX_RING)) {
-			printf("Invalid ring-flag=%d config for port =%d\n",
+			fprintf(stderr,
+				"Invalid ring-flag=%d config for port =%d\n",
 				ring_flag,port_id);
 			return -1;
 		}
@@ -414,7 +420,8 @@ parse_ringnuma_config(const char *q_arg)
 			txring_numa[port_id] = socket_id;
 			break;
 		default:
-			printf("Invalid ring-flag=%d config for port=%d\n",
+			fprintf(stderr,
+				"Invalid ring-flag=%d config for port=%d\n",
 				ring_flag,port_id);
 			break;
 		}
@@ -450,6 +457,12 @@ parse_event_printing_config(const char *optarg, int enable)
 		mask = UINT32_C(1) << RTE_ETH_EVENT_DESTROY;
 	else if (!strcmp(optarg, "flow_aged"))
 		mask = UINT32_C(1) << RTE_ETH_EVENT_FLOW_AGED;
+	else if (!strcmp(optarg, "err_recovering"))
+		mask = UINT32_C(1) << RTE_ETH_EVENT_ERR_RECOVERING;
+	else if (!strcmp(optarg, "recovery_success"))
+		mask = UINT32_C(1) << RTE_ETH_EVENT_RECOVERY_SUCCESS;
+	else if (!strcmp(optarg, "recovery_failed"))
+		mask = UINT32_C(1) << RTE_ETH_EVENT_RECOVERY_FAILED;
 	else if (!strcmp(optarg, "all"))
 		mask = ~UINT32_C(0);
 	else {
@@ -463,9 +476,115 @@ parse_event_printing_config(const char *optarg, int enable)
 	return 0;
 }
 
+static int
+parse_xstats_list(const char *in_str, struct rte_eth_xstat_name **xstats,
+		  unsigned int *xstats_num)
+{
+	int max_names_nb, names_nb, nonempty_names_nb;
+	int name, nonempty_name;
+	int stringlen;
+	char **names;
+	char *str;
+	int ret;
+	int i;
+
+	names = NULL;
+	str = strdup(in_str);
+	if (str == NULL) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	stringlen = strlen(str);
+
+	for (i = 0, max_names_nb = 1; str[i] != '\0'; i++) {
+		if (str[i] == ',')
+			max_names_nb++;
+	}
+
+	names = calloc(max_names_nb, sizeof(*names));
+	if (names == NULL) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	names_nb = rte_strsplit(str, stringlen, names, max_names_nb, ',');
+	if (names_nb < 0) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	nonempty_names_nb = 0;
+	for (i = 0; i < names_nb; i++) {
+		if (names[i][0] == '\0')
+			continue;
+		nonempty_names_nb++;
+	}
+	*xstats = calloc(nonempty_names_nb, sizeof(**xstats));
+	if (*xstats == NULL) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	for (name = nonempty_name = 0; name < names_nb; name++) {
+		if (names[name][0] == '\0')
+			continue;
+		rte_strscpy((*xstats)[nonempty_name].name, names[name],
+			    sizeof((*xstats)[nonempty_name].name));
+		nonempty_name++;
+	}
+
+	*xstats_num = nonempty_names_nb;
+	ret = 0;
+
+out:
+	free(names);
+	free(str);
+	return ret;
+}
+
+static int
+parse_link_speed(int n)
+{
+	uint32_t speed = RTE_ETH_LINK_SPEED_FIXED;
+
+	switch (n) {
+	case 1000:
+		speed |= RTE_ETH_LINK_SPEED_1G;
+		break;
+	case 10000:
+		speed |= RTE_ETH_LINK_SPEED_10G;
+		break;
+	case 25000:
+		speed |= RTE_ETH_LINK_SPEED_25G;
+		break;
+	case 40000:
+		speed |= RTE_ETH_LINK_SPEED_40G;
+		break;
+	case 50000:
+		speed |= RTE_ETH_LINK_SPEED_50G;
+		break;
+	case 100000:
+		speed |= RTE_ETH_LINK_SPEED_100G;
+		break;
+	case 200000:
+		speed |= RTE_ETH_LINK_SPEED_200G;
+		break;
+	case 100:
+	case 10:
+	default:
+		fprintf(stderr, "Unsupported fixed speed\n");
+		return 0;
+	}
+
+	return speed;
+}
+
 void
 launch_args_parse(int argc, char** argv)
 {
+#define PARAM_PROC_ID "proc-id"
+#define PARAM_NUM_PROCS "num-procs"
+
 	int n, opt;
 	char **argvopt;
 	int opt_idx;
@@ -489,6 +608,7 @@ launch_args_parse(int argc, char** argv)
 #endif
 		{ "tx-first",			0, 0, 0 },
 		{ "stats-period",		1, 0, 0 },
+		{ "display-xstats",		1, 0, 0 },
 		{ "nb-cores",			1, 0, 0 },
 		{ "nb-ports",			1, 0, 0 },
 		{ "coremask",			1, 0, 0 },
@@ -504,10 +624,6 @@ launch_args_parse(int argc, char** argv)
 		{ "total-num-mbufs",		1, 0, 0 },
 		{ "max-pkt-len",		1, 0, 0 },
 		{ "max-lro-pkt-size",		1, 0, 0 },
-		{ "pkt-filter-mode",            1, 0, 0 },
-		{ "pkt-filter-report-hash",     1, 0, 0 },
-		{ "pkt-filter-size",            1, 0, 0 },
-		{ "pkt-filter-drop-queue",      1, 0, 0 },
 #ifdef RTE_LIB_LATENCYSTATS
 		{ "latencystats",               1, 0, 0 },
 #endif
@@ -539,6 +655,8 @@ launch_args_parse(int argc, char** argv)
 		{ "hairpinq",			1, 0, 0 },
 		{ "hairpin-mode",		1, 0, 0 },
 		{ "burst",			1, 0, 0 },
+		{ "flowgen-clones",		1, 0, 0 },
+		{ "flowgen-flows",		1, 0, 0 },
 		{ "mbcache",			1, 0, 0 },
 		{ "txpt",			1, 0, 0 },
 		{ "txht",			1, 0, 0 },
@@ -553,8 +671,12 @@ launch_args_parse(int argc, char** argv)
 		{ "flow-isolate-all",	        0, 0, 0 },
 		{ "rxoffs",			1, 0, 0 },
 		{ "rxpkts",			1, 0, 0 },
+		{ "rxhdrs",			1, 0, 0 },
 		{ "txpkts",			1, 0, 0 },
+		{ "multi-rx-mempool",           0, 0, 0 },
 		{ "txonly-multi-flow",		0, 0, 0 },
+		{ "rxq-share",			2, 0, 0 },
+		{ "eth-link-speed",		1, 0, 0 },
 		{ "disable-link-check",		0, 0, 0 },
 		{ "disable-device-start",	0, 0, 0 },
 		{ "no-lsc-interrupt",		0, 0, 0 },
@@ -566,8 +688,10 @@ launch_args_parse(int argc, char** argv)
 		{ "hot-plug",			0, 0, 0 },
 		{ "vxlan-gpe-port",		1, 0, 0 },
 		{ "geneve-parsed-port",		1, 0, 0 },
+#ifndef RTE_EXEC_ENV_WINDOWS
 		{ "mlockall",			0, 0, 0 },
 		{ "no-mlockall",		0, 0, 0 },
+#endif
 		{ "mp-alloc",			1, 0, 0 },
 		{ "tx-ip",			1, 0, 0 },
 		{ "tx-udp",			1, 0, 0 },
@@ -581,6 +705,8 @@ launch_args_parse(int argc, char** argv)
 		{ "rx-mq-mode",                 1, 0, 0 },
 		{ "record-core-cycles",         0, 0, 0 },
 		{ "record-burst-stats",         0, 0, 0 },
+		{ PARAM_NUM_PROCS,              1, 0, 0 },
+		{ PARAM_PROC_ID,                1, 0, 0 },
 		{ 0, 0, 0, 0 },
 	};
 
@@ -637,10 +763,20 @@ launch_args_parse(int argc, char** argv)
 				n = strtoul(optarg, &end, 10);
 				if ((optarg[0] == '\0') || (end == NULL) ||
 						(*end != '\0'))
-					break;
+					rte_exit(EXIT_FAILURE, "Invalid stats-period value\n");
 
 				stats_period = n;
 				break;
+			}
+			if (!strcmp(lgopts[opt_idx].name, "display-xstats")) {
+				char rc;
+
+				rc = parse_xstats_list(optarg, &xstats_display,
+						       &xstats_display_num);
+				if (rc != 0)
+					rte_exit(EXIT_FAILURE,
+						 "Failed to parse display-xstats argument: %d\n",
+						 rc);
 			}
 			if (!strcmp(lgopts[opt_idx].name,
 				    "eth-peers-configfile")) {
@@ -679,13 +815,13 @@ launch_args_parse(int argc, char** argv)
 						 "Invalid tx-ip: %s", optarg);
 
 				*end++ = 0;
-				if (inet_aton(optarg, &in) == 0)
+				if (inet_pton(AF_INET, optarg, &in) == 0)
 					rte_exit(EXIT_FAILURE,
 						 "Invalid source IP address: %s\n",
 						 optarg);
 				tx_ip_src_addr = rte_be_to_cpu_32(in.s_addr);
 
-				if (inet_aton(end, &in) == 0)
+				if (inet_pton(AF_INET, end, &in) == 0)
 					rte_exit(EXIT_FAILURE,
 						 "Invalid destination IP address: %s\n",
 						 optarg);
@@ -728,8 +864,8 @@ launch_args_parse(int argc, char** argv)
 			}
 			if (!strcmp(lgopts[opt_idx].name, "nb-cores")) {
 				n = atoi(optarg);
-				if (n > 0 && n <= nb_lcores)
-					nb_fwd_lcores = (uint8_t) n;
+				if (n > 0 && (lcoreid_t)n <= nb_lcores)
+					nb_fwd_lcores = (lcoreid_t) n;
 				else
 					rte_exit(EXIT_FAILURE,
 						 "nb-cores should be > 0 and <= %d\n",
@@ -814,7 +950,7 @@ launch_args_parse(int argc, char** argv)
 			if (!strcmp(lgopts[opt_idx].name, "max-pkt-len")) {
 				n = atoi(optarg);
 				if (n >= RTE_ETHER_MIN_LEN)
-					rx_mode.max_rx_pkt_len = (uint32_t) n;
+					max_rx_pkt_len = n;
 				else
 					rte_exit(EXIT_FAILURE,
 						 "Invalid max-pkt-len=%d - should be > %d\n",
@@ -823,67 +959,6 @@ launch_args_parse(int argc, char** argv)
 			if (!strcmp(lgopts[opt_idx].name, "max-lro-pkt-size")) {
 				n = atoi(optarg);
 				rx_mode.max_lro_pkt_size = (uint32_t) n;
-			}
-			if (!strcmp(lgopts[opt_idx].name, "pkt-filter-mode")) {
-				if (!strcmp(optarg, "signature"))
-					fdir_conf.mode =
-						RTE_FDIR_MODE_SIGNATURE;
-				else if (!strcmp(optarg, "perfect"))
-					fdir_conf.mode = RTE_FDIR_MODE_PERFECT;
-				else if (!strcmp(optarg, "perfect-mac-vlan"))
-					fdir_conf.mode = RTE_FDIR_MODE_PERFECT_MAC_VLAN;
-				else if (!strcmp(optarg, "perfect-tunnel"))
-					fdir_conf.mode = RTE_FDIR_MODE_PERFECT_TUNNEL;
-				else if (!strcmp(optarg, "none"))
-					fdir_conf.mode = RTE_FDIR_MODE_NONE;
-				else
-					rte_exit(EXIT_FAILURE,
-						 "pkt-mode-invalid %s invalid - must be: "
-						 "none, signature, perfect, perfect-mac-vlan"
-						 " or perfect-tunnel\n",
-						 optarg);
-			}
-			if (!strcmp(lgopts[opt_idx].name,
-				    "pkt-filter-report-hash")) {
-				if (!strcmp(optarg, "none"))
-					fdir_conf.status =
-						RTE_FDIR_NO_REPORT_STATUS;
-				else if (!strcmp(optarg, "match"))
-					fdir_conf.status =
-						RTE_FDIR_REPORT_STATUS;
-				else if (!strcmp(optarg, "always"))
-					fdir_conf.status =
-						RTE_FDIR_REPORT_STATUS_ALWAYS;
-				else
-					rte_exit(EXIT_FAILURE,
-						 "pkt-filter-report-hash %s invalid "
-						 "- must be: none or match or always\n",
-						 optarg);
-			}
-			if (!strcmp(lgopts[opt_idx].name, "pkt-filter-size")) {
-				if (!strcmp(optarg, "64K"))
-					fdir_conf.pballoc =
-						RTE_FDIR_PBALLOC_64K;
-				else if (!strcmp(optarg, "128K"))
-					fdir_conf.pballoc =
-						RTE_FDIR_PBALLOC_128K;
-				else if (!strcmp(optarg, "256K"))
-					fdir_conf.pballoc =
-						RTE_FDIR_PBALLOC_256K;
-				else
-					rte_exit(EXIT_FAILURE, "pkt-filter-size %s invalid -"
-						 " must be: 64K or 128K or 256K\n",
-						 optarg);
-			}
-			if (!strcmp(lgopts[opt_idx].name,
-				    "pkt-filter-drop-queue")) {
-				n = atoi(optarg);
-				if (n >= 0)
-					fdir_conf.drop_queue = (uint8_t) n;
-				else
-					rte_exit(EXIT_FAILURE,
-						 "drop queue %d invalid - must"
-						 "be >= 0 \n", n);
 			}
 #ifdef RTE_LIB_LATENCYSTATS
 			if (!strcmp(lgopts[opt_idx].name,
@@ -911,34 +986,34 @@ launch_args_parse(int argc, char** argv)
 			}
 #endif
 			if (!strcmp(lgopts[opt_idx].name, "disable-crc-strip"))
-				rx_offloads |= DEV_RX_OFFLOAD_KEEP_CRC;
+				rx_offloads |= RTE_ETH_RX_OFFLOAD_KEEP_CRC;
 			if (!strcmp(lgopts[opt_idx].name, "enable-lro"))
-				rx_offloads |= DEV_RX_OFFLOAD_TCP_LRO;
+				rx_offloads |= RTE_ETH_RX_OFFLOAD_TCP_LRO;
 			if (!strcmp(lgopts[opt_idx].name, "enable-scatter"))
-				rx_offloads |= DEV_RX_OFFLOAD_SCATTER;
+				rx_offloads |= RTE_ETH_RX_OFFLOAD_SCATTER;
 			if (!strcmp(lgopts[opt_idx].name, "enable-rx-cksum"))
-				rx_offloads |= DEV_RX_OFFLOAD_CHECKSUM;
+				rx_offloads |= RTE_ETH_RX_OFFLOAD_CHECKSUM;
 			if (!strcmp(lgopts[opt_idx].name,
 					"enable-rx-timestamp"))
-				rx_offloads |= DEV_RX_OFFLOAD_TIMESTAMP;
+				rx_offloads |= RTE_ETH_RX_OFFLOAD_TIMESTAMP;
 			if (!strcmp(lgopts[opt_idx].name, "enable-hw-vlan"))
-				rx_offloads |= DEV_RX_OFFLOAD_VLAN;
+				rx_offloads |= RTE_ETH_RX_OFFLOAD_VLAN;
 
 			if (!strcmp(lgopts[opt_idx].name,
 					"enable-hw-vlan-filter"))
-				rx_offloads |= DEV_RX_OFFLOAD_VLAN_FILTER;
+				rx_offloads |= RTE_ETH_RX_OFFLOAD_VLAN_FILTER;
 
 			if (!strcmp(lgopts[opt_idx].name,
 					"enable-hw-vlan-strip"))
-				rx_offloads |= DEV_RX_OFFLOAD_VLAN_STRIP;
+				rx_offloads |= RTE_ETH_RX_OFFLOAD_VLAN_STRIP;
 
 			if (!strcmp(lgopts[opt_idx].name,
 					"enable-hw-vlan-extend"))
-				rx_offloads |= DEV_RX_OFFLOAD_VLAN_EXTEND;
+				rx_offloads |= RTE_ETH_RX_OFFLOAD_VLAN_EXTEND;
 
 			if (!strcmp(lgopts[opt_idx].name,
 					"enable-hw-qinq-strip"))
-				rx_offloads |= DEV_RX_OFFLOAD_QINQ_STRIP;
+				rx_offloads |= RTE_ETH_RX_OFFLOAD_QINQ_STRIP;
 
 			if (!strcmp(lgopts[opt_idx].name, "enable-drop-en"))
 				rx_drop_en = 1;
@@ -960,13 +1035,13 @@ launch_args_parse(int argc, char** argv)
 			if (!strcmp(lgopts[opt_idx].name, "forward-mode"))
 				set_pkt_forwarding_mode(optarg);
 			if (!strcmp(lgopts[opt_idx].name, "rss-ip"))
-				rss_hf = ETH_RSS_IP;
+				rss_hf = RTE_ETH_RSS_IP;
 			if (!strcmp(lgopts[opt_idx].name, "rss-udp"))
-				rss_hf = ETH_RSS_UDP;
+				rss_hf = RTE_ETH_RSS_UDP;
 			if (!strcmp(lgopts[opt_idx].name, "rss-level-inner"))
-				rss_hf |= ETH_RSS_LEVEL_INNERMOST;
+				rss_hf |= RTE_ETH_RSS_LEVEL_INNERMOST;
 			if (!strcmp(lgopts[opt_idx].name, "rss-level-outer"))
-				rss_hf |= ETH_RSS_LEVEL_OUTERMOST;
+				rss_hf |= RTE_ETH_RSS_LEVEL_OUTERMOST;
 			if (!strcmp(lgopts[opt_idx].name, "rxq")) {
 				n = atoi(optarg);
 				if (n >= 0 && check_nb_rxq((queueid_t)n) == 0)
@@ -1023,7 +1098,7 @@ launch_args_parse(int argc, char** argv)
 				if (errno != 0 || end == optarg)
 					rte_exit(EXIT_FAILURE, "hairpin mode invalid\n");
 				else
-					hairpin_mode = (uint16_t)n;
+					hairpin_mode = (uint32_t)n;
 			}
 			if (!strcmp(lgopts[opt_idx].name, "burst")) {
 				n = atoi(optarg);
@@ -1040,7 +1115,9 @@ launch_args_parse(int argc, char** argv)
 								0,
 								&dev_info);
 					if (ret != 0)
-						return;
+						rte_exit(EXIT_FAILURE, "Failed to get driver "
+							"recommended burst size, please provide a "
+							"value between 1 and %d\n", MAX_PKT_BURST);
 
 					rec_nb_pkts = dev_info
 						.default_rxportconf.burst_size;
@@ -1064,6 +1141,22 @@ launch_args_parse(int argc, char** argv)
 						MAX_PKT_BURST);
 				else
 					nb_pkt_per_burst = (uint16_t) n;
+			}
+			if (!strcmp(lgopts[opt_idx].name, "flowgen-clones")) {
+				n = atoi(optarg);
+				if (n >= 0)
+					nb_pkt_flowgen_clones = (uint16_t) n;
+				else
+					rte_exit(EXIT_FAILURE,
+						 "clones must be >= 0 and <= current burst\n");
+			}
+			if (!strcmp(lgopts[opt_idx].name, "flowgen-flows")) {
+				n = atoi(optarg);
+				if (n > 0)
+					nb_flows_flowgen = (int) n;
+				else
+					rte_exit(EXIT_FAILURE,
+						 "flows must be >= 1\n");
 			}
 			if (!strcmp(lgopts[opt_idx].name, "mbcache")) {
 				n = atoi(optarg);
@@ -1176,13 +1269,25 @@ launch_args_parse(int argc, char** argv)
 			if (!strcmp(lgopts[opt_idx].name, "rxpkts")) {
 				unsigned int seg_len[MAX_SEGS_BUFFER_SPLIT];
 				unsigned int nb_segs;
-
 				nb_segs = parse_item_list
 						(optarg, "rxpkt segments",
 						 MAX_SEGS_BUFFER_SPLIT,
 						 seg_len, 0);
 				if (nb_segs > 0)
 					set_rx_pkt_segments(seg_len, nb_segs);
+				else
+					rte_exit(EXIT_FAILURE, "bad rxpkts\n");
+			}
+			if (!strcmp(lgopts[opt_idx].name, "rxhdrs")) {
+				unsigned int seg_hdrs[MAX_SEGS_BUFFER_SPLIT];
+				unsigned int nb_segs;
+
+				nb_segs = parse_hdrs_list
+						(optarg, "rxpkt segments",
+						MAX_SEGS_BUFFER_SPLIT,
+						seg_hdrs);
+				if (nb_segs > 0)
+					set_rx_pkt_hdrs(seg_hdrs, nb_segs);
 				else
 					rte_exit(EXIT_FAILURE, "bad rxpkts\n");
 			}
@@ -1197,10 +1302,28 @@ launch_args_parse(int argc, char** argv)
 				else
 					rte_exit(EXIT_FAILURE, "bad txpkts\n");
 			}
+			if (!strcmp(lgopts[opt_idx].name, "multi-rx-mempool"))
+				multi_rx_mempool = 1;
 			if (!strcmp(lgopts[opt_idx].name, "txonly-multi-flow"))
 				txonly_multi_flow = 1;
+			if (!strcmp(lgopts[opt_idx].name, "rxq-share")) {
+				if (optarg == NULL) {
+					rxq_share = UINT32_MAX;
+				} else {
+					n = atoi(optarg);
+					if (n >= 0)
+						rxq_share = (uint32_t)n;
+					else
+						rte_exit(EXIT_FAILURE, "rxq-share must be >= 0\n");
+				}
+			}
 			if (!strcmp(lgopts[opt_idx].name, "no-flush-rx"))
 				no_flush_rx = 1;
+			if (!strcmp(lgopts[opt_idx].name, "eth-link-speed")) {
+				n = atoi(optarg);
+				if (n >= 0 && parse_link_speed(n) > 0)
+					eth_link_speed = parse_link_speed(n);
+			}
 			if (!strcmp(lgopts[opt_idx].name, "disable-link-check"))
 				no_link_check = 1;
 			if (!strcmp(lgopts[opt_idx].name, "disable-device-start"))
@@ -1319,22 +1442,26 @@ launch_args_parse(int argc, char** argv)
 						 "noisy-lkup-num-reads-writes must be >= 0\n");
 			}
 			if (!strcmp(lgopts[opt_idx].name, "no-iova-contig"))
-				mempool_flags = MEMPOOL_F_NO_IOVA_CONTIG;
+				mempool_flags = RTE_MEMPOOL_F_NO_IOVA_CONTIG;
 
 			if (!strcmp(lgopts[opt_idx].name, "rx-mq-mode")) {
 				char *end = NULL;
 				n = strtoul(optarg, &end, 16);
-				if (n >= 0 && n <= ETH_MQ_RX_VMDQ_DCB_RSS)
+				if (n >= 0 && n <= RTE_ETH_MQ_RX_VMDQ_DCB_RSS)
 					rx_mq_mode = (enum rte_eth_rx_mq_mode)n;
 				else
 					rte_exit(EXIT_FAILURE,
 						 "rx-mq-mode must be >= 0 and <= %d\n",
-						 ETH_MQ_RX_VMDQ_DCB_RSS);
+						 RTE_ETH_MQ_RX_VMDQ_DCB_RSS);
 			}
 			if (!strcmp(lgopts[opt_idx].name, "record-core-cycles"))
 				record_core_cycles = 1;
 			if (!strcmp(lgopts[opt_idx].name, "record-burst-stats"))
 				record_burst_stats = 1;
+			if (!strcmp(lgopts[opt_idx].name, PARAM_NUM_PROCS))
+				num_procs = atoi(optarg);
+			if (!strcmp(lgopts[opt_idx].name, PARAM_PROC_ID))
+				proc_id = atoi(optarg);
 			break;
 		case 'h':
 			usage(argv[0]);
@@ -1342,7 +1469,7 @@ launch_args_parse(int argc, char** argv)
 			break;
 		default:
 			usage(argv[0]);
-			printf("Invalid option: %s\n", argv[optind]);
+			fprintf(stderr, "Invalid option: %s\n", argv[optind - 1]);
 			rte_exit(EXIT_FAILURE,
 				 "Command line is incomplete or incorrect\n");
 			break;
@@ -1351,15 +1478,21 @@ launch_args_parse(int argc, char** argv)
 
 	if (optind != argc) {
 		usage(argv[0]);
-		printf("Invalid parameter: %s\n", argv[optind]);
+		fprintf(stderr, "Invalid parameter: %s\n", argv[optind]);
 		rte_exit(EXIT_FAILURE, "Command line is incorrect\n");
 	}
+
+	if (proc_id >= (int)num_procs)
+		rte_exit(EXIT_FAILURE,
+			 "The multi-process option '%s(%d)' should be less than '%s(%u)'\n",
+			 PARAM_PROC_ID, proc_id,
+			 PARAM_NUM_PROCS, num_procs);
 
 	/* Set offload configuration from command line parameters. */
 	rx_mode.offloads = rx_offloads;
 	tx_mode.offloads = tx_offloads;
 
-	if (mempool_flags & MEMPOOL_F_NO_IOVA_CONTIG &&
+	if (mempool_flags & RTE_MEMPOOL_F_NO_IOVA_CONTIG &&
 	    mp_alloc_type != MP_ALLOC_ANON) {
 		TESTPMD_LOG(WARNING, "cannot use no-iova-contig without "
 				  "mp-alloc=anon. mempool no-iova-contig is "

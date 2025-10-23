@@ -6,7 +6,11 @@
 #define TEST_CRYPTODEV_HASH_TEST_VECTORS_H_
 
 #ifdef RTE_CRYPTO_AESNI_MB
+#if defined(RTE_ARCH_ARM)
+#include <ipsec-mb.h>
+#else
 #include <intel-ipsec-mb.h>
+#endif
 #endif
 
 static const uint8_t plaintext_hash[] = {
@@ -353,6 +357,31 @@ cmac_test_vector = {
 };
 
 static const struct blockcipher_test_data
+aes_xcbc_mac_test_vector = {
+	.auth_algo = RTE_CRYPTO_AUTH_AES_XCBC_MAC,
+	.ciphertext = {
+		.data = plaintext_hash,
+		.len = 512
+	},
+	.auth_key = {
+		.data = {
+			0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+			0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f
+		},
+		.len = 16
+	},
+	.digest = {
+		.data = {
+			0x07, 0xf1, 0xf5, 0x80, 0x5a, 0xbc, 0x1d, 0x1c,
+			0x58, 0x43, 0x99, 0xbe
+
+		},
+		.len = 12,
+		.truncated_len = 12
+	}
+};
+
+static const struct blockcipher_test_data
 null_auth_test_vector = {
 	.auth_algo = RTE_CRYPTO_AUTH_NULL,
 	.ciphertext = {		/* arbitrary data - shouldn't be used */
@@ -438,10 +467,12 @@ static const struct blockcipher_test_case hash_test_cases[] = {
 		.op_mask = BLOCKCIPHER_TEST_OP_AUTH_GEN,
 	},
 	{
-		.test_descr = "HMAC-SHA1 Digest Scatter Gather",
+		.test_descr = "HMAC-SHA1 Digest Scatter Gather (Inplace)",
 		.test_data = &hmac_sha1_test_vector,
 		.op_mask = BLOCKCIPHER_TEST_OP_AUTH_GEN,
 		.feature_mask = BLOCKCIPHER_TEST_FEATURE_SG,
+		.sgl_flag = RTE_CRYPTODEV_FF_IN_PLACE_SGL,
+		.sgl_segs = 3
 	},
 	{
 		.test_descr = "HMAC-SHA1 Digest Verify",
@@ -449,10 +480,12 @@ static const struct blockcipher_test_case hash_test_cases[] = {
 		.op_mask = BLOCKCIPHER_TEST_OP_AUTH_VERIFY,
 	},
 	{
-		.test_descr = "HMAC-SHA1 Digest Verify Scatter Gather",
+		.test_descr = "HMAC-SHA1 Digest Verify Scatter Gather (Inplace)",
 		.test_data = &hmac_sha1_test_vector,
 		.op_mask = BLOCKCIPHER_TEST_OP_AUTH_VERIFY,
 		.feature_mask = BLOCKCIPHER_TEST_FEATURE_SG,
+		.sgl_flag = RTE_CRYPTODEV_FF_IN_PLACE_SGL,
+		.sgl_segs = 3
 	},
 	{
 		.test_descr = "SHA224 Digest",
@@ -575,6 +608,16 @@ static const struct blockcipher_test_case hash_test_cases[] = {
 		.test_data = &null_auth_test_vector,
 		.op_mask = BLOCKCIPHER_TEST_OP_AUTH_VERIFY,
 		.feature_mask = BLOCKCIPHER_TEST_FEATURE_OOP,
+	},
+	{
+		.test_descr = "AES-XCBC-MAC Digest 16B",
+		.test_data = &aes_xcbc_mac_test_vector,
+		.op_mask = BLOCKCIPHER_TEST_OP_AUTH_GEN,
+	},
+	{
+		.test_descr = "AES-XCBC-MAC Digest Verify 16B",
+		.test_data = &aes_xcbc_mac_test_vector,
+		.op_mask = BLOCKCIPHER_TEST_OP_AUTH_VERIFY,
 	},
 
 };

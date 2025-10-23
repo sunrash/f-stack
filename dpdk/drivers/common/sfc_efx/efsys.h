@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause
  *
- * Copyright(c) 2019-2020 Xilinx, Inc.
+ * Copyright(c) 2019-2021 Xilinx, Inc.
  * Copyright(c) 2016-2019 Solarflare Communications Inc.
  *
  * This software was jointly developed between OKTET Labs (under contract
@@ -12,6 +12,7 @@
 
 #include <stdbool.h>
 
+#include <rte_compat.h>
 #include <rte_spinlock.h>
 #include <rte_byteorder.h>
 #include <rte_debug.h>
@@ -186,6 +187,8 @@ prefetch_read_once(const volatile void *addr)
 #define EFSYS_OPT_DESC_PROXY 0
 
 #define EFSYS_OPT_MAE 1
+
+#define EFSYS_OPT_VIRTIO 1
 
 /* ID */
 

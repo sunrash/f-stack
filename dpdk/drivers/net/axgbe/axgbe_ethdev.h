@@ -12,11 +12,10 @@
 #include "rte_time.h"
 
 #define IRQ				0xff
-#define VLAN_HLEN			4
 
 #define AXGBE_TX_MAX_BUF_SIZE		(0x3fff & ~(64 - 1))
 #define AXGBE_RX_MAX_BUF_SIZE		(0x3fff & ~(64 - 1))
-#define AXGBE_RX_MIN_BUF_SIZE		(RTE_ETHER_MAX_LEN + VLAN_HLEN)
+#define AXGBE_RX_MIN_BUF_SIZE		(RTE_ETHER_MAX_LEN + RTE_VLAN_HLEN)
 #define AXGBE_MAX_MAC_ADDRS		32
 #define AXGBE_MAX_HASH_MAC_ADDRS	256
 
@@ -97,12 +96,12 @@
 
 /* Receive Side Scaling */
 #define AXGBE_RSS_OFFLOAD  ( \
-	ETH_RSS_IPV4 | \
-	ETH_RSS_NONFRAG_IPV4_TCP | \
-	ETH_RSS_NONFRAG_IPV4_UDP | \
-	ETH_RSS_IPV6 | \
-	ETH_RSS_NONFRAG_IPV6_TCP | \
-	ETH_RSS_NONFRAG_IPV6_UDP)
+	RTE_ETH_RSS_IPV4 | \
+	RTE_ETH_RSS_NONFRAG_IPV4_TCP | \
+	RTE_ETH_RSS_NONFRAG_IPV4_UDP | \
+	RTE_ETH_RSS_IPV6 | \
+	RTE_ETH_RSS_NONFRAG_IPV6_TCP | \
+	RTE_ETH_RSS_NONFRAG_IPV6_UDP)
 
 #define AXGBE_RSS_HASH_KEY_SIZE		40
 #define AXGBE_RSS_MAX_TABLE_SIZE	256
@@ -112,6 +111,7 @@
 /* Auto-negotiation */
 #define AXGBE_AN_MS_TIMEOUT		500
 #define AXGBE_LINK_TIMEOUT		5
+#define AXGBE_KR_TRAINING_WAIT_ITER	50
 
 #define AXGBE_SGMII_AN_LINK_STATUS	BIT(1)
 #define AXGBE_SGMII_AN_LINK_SPEED	(BIT(2) | BIT(3))
@@ -305,6 +305,13 @@ struct axgbe_hw_if {
 	int (*config_tx_flow_control)(struct axgbe_port *);
 	int (*config_rx_flow_control)(struct axgbe_port *);
 
+	/* vlan */
+	int (*enable_rx_vlan_stripping)(struct axgbe_port *);
+	int (*disable_rx_vlan_stripping)(struct axgbe_port *);
+	int (*enable_rx_vlan_filtering)(struct axgbe_port *);
+	int (*disable_rx_vlan_filtering)(struct axgbe_port *);
+	int (*update_vlan_hash_table)(struct axgbe_port *);
+
 	int (*exit)(struct axgbe_port *);
 };
 
@@ -439,6 +446,12 @@ struct axgbe_hw_features {
 	unsigned int tx_ch_cnt;		/* Number of DMA Transmit Channels */
 	unsigned int pps_out_num;	/* Number of PPS outputs */
 	unsigned int aux_snap_num;	/* Number of Aux snapshot inputs */
+
+	/* HW Feature Register3 */
+	unsigned int tx_q_vlan_tag_ins; /* Queue/Channel based VLAN tag */
+					/* insertion on Tx Enable */
+	unsigned int no_of_vlan_extn;   /* Number of Extended VLAN Tag */
+					/* Filters Enabled */
 };
 
 struct axgbe_version_data {
@@ -451,6 +464,7 @@ struct axgbe_version_data {
 	unsigned int ecc_support;
 	unsigned int i2c_support;
 	unsigned int an_cdr_workaround;
+	unsigned int enable_rrc;
 };
 
 struct axgbe_mmc_stats {
@@ -570,6 +584,7 @@ struct axgbe_port {
 	unsigned int tx_pbl;
 	unsigned int tx_osp_mode;
 	unsigned int tx_max_fifo_size;
+	unsigned int multi_segs_tx;
 
 	/* Rx settings */
 	unsigned int rx_sf_mode;
@@ -640,6 +655,7 @@ struct axgbe_port {
 	unsigned int parallel_detect;
 	unsigned int fec_ability;
 	unsigned long an_start;
+	unsigned long kr_start_time;
 	enum axgbe_an_mode an_mode;
 
 	/* I2C support */
@@ -659,6 +675,9 @@ struct axgbe_port {
 	unsigned int hash_table_count;
 	unsigned int uc_hash_mac_addr;
 	unsigned int uc_hash_table[AXGBE_MAC_HASH_TABLE_SIZE];
+
+	/* Filtering support */
+	unsigned long active_vlans[VLAN_TABLE_SIZE];
 
 	/* For IEEE1588 PTP */
 	struct rte_timecounter systime_tc;

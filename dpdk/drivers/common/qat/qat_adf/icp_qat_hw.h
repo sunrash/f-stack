@@ -4,6 +4,24 @@
 #ifndef _ICP_QAT_HW_H_
 #define _ICP_QAT_HW_H_
 
+#define ADF_C4XXXIOV_VFLEGFUSES_OFFSET	0x4C
+#define ADF1_C4XXXIOV_VFLEGFUSES_LEN	4
+
+enum icp_qat_slice_mask {
+	ICP_ACCEL_MASK_CIPHER_SLICE = 0x01,
+	ICP_ACCEL_MASK_AUTH_SLICE = 0x02,
+	ICP_ACCEL_MASK_PKE_SLICE = 0x04,
+	ICP_ACCEL_MASK_COMPRESS_SLICE = 0x08,
+	ICP_ACCEL_MASK_DEPRECATED = 0x10,
+	ICP_ACCEL_MASK_EIA3_SLICE = 0x20,
+	ICP_ACCEL_MASK_SHA3_SLICE = 0x40,
+	ICP_ACCEL_MASK_CRYPTO0_SLICE = 0x80,
+	ICP_ACCEL_MASK_CRYPTO1_SLICE = 0x100,
+	ICP_ACCEL_MASK_CRYPTO2_SLICE = 0x200,
+	ICP_ACCEL_MASK_SM3_SLICE = 0x400,
+	ICP_ACCEL_MASK_SM4_SLICE = 0x800
+};
+
 enum icp_qat_hw_ae_id {
 	ICP_QAT_HW_AE_0 = 0,
 	ICP_QAT_HW_AE_1 = 1,
@@ -46,7 +64,7 @@ enum icp_qat_hw_auth_algo {
 	ICP_QAT_HW_AUTH_ALGO_KASUMI_F9 = 12,
 	ICP_QAT_HW_AUTH_ALGO_SNOW_3G_UIA2 = 13,
 	ICP_QAT_HW_AUTH_ALGO_ZUC_3G_128_EIA3 = 14,
-	ICP_QAT_HW_AUTH_RESERVED_1 = 15,
+	ICP_QAT_HW_AUTH_ALGO_SM3 = 15,
 	ICP_QAT_HW_AUTH_RESERVED_2 = 16,
 	ICP_QAT_HW_AUTH_ALGO_SHA3_256 = 17,
 	ICP_QAT_HW_AUTH_RESERVED_3 = 18,
@@ -134,6 +152,7 @@ struct icp_qat_hw_auth_setup {
 #define ICP_QAT_HW_SHA224_STATE1_SZ 32
 #define ICP_QAT_HW_SHA3_224_STATE1_SZ 28
 #define ICP_QAT_HW_SHA256_STATE1_SZ 32
+#define ICP_QAT_HW_SM3_STATE1_SZ 32
 #define ICP_QAT_HW_SHA3_256_STATE1_SZ 32
 #define ICP_QAT_HW_SHA384_STATE1_SZ 64
 #define ICP_QAT_HW_SHA3_384_STATE1_SZ 48
@@ -153,6 +172,7 @@ struct icp_qat_hw_auth_setup {
 #define ICP_QAT_HW_SHA224_STATE2_SZ 32
 #define ICP_QAT_HW_SHA3_224_STATE2_SZ 0
 #define ICP_QAT_HW_SHA256_STATE2_SZ 32
+#define ICP_QAT_HW_SM3_STATE2_SZ 32
 #define ICP_QAT_HW_SHA3_256_STATE2_SZ 0
 #define ICP_QAT_HW_SHA384_STATE2_SZ 64
 #define ICP_QAT_HW_SHA3_384_STATE2_SZ 0
@@ -339,6 +359,16 @@ enum icp_qat_hw_cipher_convert {
 
 struct icp_qat_hw_cipher_algo_blk {
 	struct icp_qat_hw_cipher_config cipher_config;
+	uint8_t key[ICP_QAT_HW_CIPHER_MAX_KEY_SZ];
+} __rte_cache_aligned;
+
+struct icp_qat_hw_ucs_cipher_config {
+	uint32_t val;
+	uint32_t reserved[3];
+};
+
+struct icp_qat_hw_cipher_algo_blk20 {
+	struct icp_qat_hw_ucs_cipher_config cipher_config;
 	uint8_t key[ICP_QAT_HW_CIPHER_MAX_KEY_SZ];
 } __rte_cache_aligned;
 

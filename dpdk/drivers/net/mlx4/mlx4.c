@@ -31,10 +31,10 @@
 #endif
 
 #include <rte_common.h>
-#include <rte_dev.h>
+#include <dev_driver.h>
 #include <rte_errno.h>
-#include <rte_ethdev_driver.h>
-#include <rte_ethdev_pci.h>
+#include <ethdev_driver.h>
+#include <ethdev_pci.h>
 #include <rte_ether.h>
 #include <rte_flow.h>
 #include <rte_interrupts.h>
@@ -292,6 +292,7 @@ mlx4_dev_start(struct rte_eth_dev *dev)
 {
 	struct mlx4_priv *priv = dev->data->dev_private;
 	struct rte_flow_error error;
+	uint16_t i;
 	int ret;
 
 	if (priv->started)
@@ -327,6 +328,12 @@ mlx4_dev_start(struct rte_eth_dev *dev)
 	dev->rx_pkt_burst = mlx4_rx_burst;
 	/* Enable datapath on secondary process. */
 	mlx4_mp_req_start_rxtx(dev);
+
+	for (i = 0; i < dev->data->nb_rx_queues; i++)
+		dev->data->rx_queue_state[i] = RTE_ETH_QUEUE_STATE_STARTED;
+	for (i = 0; i < dev->data->nb_tx_queues; i++)
+		dev->data->tx_queue_state[i] = RTE_ETH_QUEUE_STATE_STARTED;
+
 	return 0;
 err:
 	mlx4_dev_stop(dev);
@@ -345,19 +352,25 @@ static int
 mlx4_dev_stop(struct rte_eth_dev *dev)
 {
 	struct mlx4_priv *priv = dev->data->dev_private;
+	uint16_t i;
 
 	if (!priv->started)
 		return 0;
 	DEBUG("%p: detaching flows from all RX queues", (void *)dev);
 	priv->started = 0;
-	dev->tx_pkt_burst = mlx4_tx_burst_removed;
-	dev->rx_pkt_burst = mlx4_rx_burst_removed;
+	dev->tx_pkt_burst = rte_eth_pkt_burst_dummy;
+	dev->rx_pkt_burst = rte_eth_pkt_burst_dummy;
 	rte_wmb();
 	/* Disable datapath on secondary process. */
 	mlx4_mp_req_stop_rxtx(dev);
 	mlx4_flow_sync(priv, NULL);
 	mlx4_rxq_intr_disable(priv);
 	mlx4_rss_deinit(priv);
+
+	for (i = 0; i < dev->data->nb_rx_queues; i++)
+		dev->data->rx_queue_state[i] = RTE_ETH_QUEUE_STATE_STOPPED;
+	for (i = 0; i < dev->data->nb_tx_queues; i++)
+		dev->data->tx_queue_state[i] = RTE_ETH_QUEUE_STATE_STOPPED;
 
 	return 0;
 }
@@ -383,17 +396,17 @@ mlx4_dev_close(struct rte_eth_dev *dev)
 	DEBUG("%p: closing device \"%s\"",
 	      (void *)dev,
 	      ((priv->ctx != NULL) ? priv->ctx->device->name : ""));
-	dev->rx_pkt_burst = mlx4_rx_burst_removed;
-	dev->tx_pkt_burst = mlx4_tx_burst_removed;
+	dev->rx_pkt_burst = rte_eth_pkt_burst_dummy;
+	dev->tx_pkt_burst = rte_eth_pkt_burst_dummy;
 	rte_wmb();
 	/* Disable datapath on secondary process. */
 	mlx4_mp_req_stop_rxtx(dev);
 	mlx4_flow_clean(priv);
 	mlx4_rss_deinit(priv);
 	for (i = 0; i != dev->data->nb_rx_queues; ++i)
-		mlx4_rx_queue_release(dev->data->rx_queues[i]);
+		mlx4_rx_queue_release(dev, i);
 	for (i = 0; i != dev->data->nb_tx_queues; ++i)
-		mlx4_tx_queue_release(dev->data->tx_queues[i]);
+		mlx4_tx_queue_release(dev, i);
 	mlx4_proc_priv_uninit(dev);
 	mlx4_mr_release(dev);
 	if (priv->pd != NULL) {
@@ -438,7 +451,7 @@ static const struct eth_dev_ops mlx4_dev_ops = {
 	.flow_ctrl_get = mlx4_flow_ctrl_get,
 	.flow_ctrl_set = mlx4_flow_ctrl_set,
 	.mtu_set = mlx4_mtu_set,
-	.filter_ctrl = mlx4_filter_ctrl,
+	.flow_ops_get = mlx4_flow_ops_get,
 	.rx_queue_intr_enable = mlx4_rx_intr_enable,
 	.rx_queue_intr_disable = mlx4_rx_intr_disable,
 	.is_removed = mlx4_is_removed,
@@ -877,6 +890,8 @@ mlx4_pci_probe(struct rte_pci_driver *pci_drv, struct rte_pci_device *pci_dev)
 		snprintf(name, sizeof(name), "%s port %u",
 			 mlx4_glue->get_device_name(ibv_dev), port);
 		if (rte_eal_process_type() == RTE_PROC_SECONDARY) {
+			int fd;
+
 			eth_dev = rte_eth_dev_attach_secondary(name);
 			if (eth_dev == NULL) {
 				ERROR("can not attach rte ethdev");
@@ -899,13 +914,14 @@ mlx4_pci_probe(struct rte_pci_driver *pci_drv, struct rte_pci_device *pci_dev)
 			if (err)
 				goto err_secondary;
 			/* Receive command fd from primary process. */
-			err = mlx4_mp_req_verbs_cmd_fd(eth_dev);
-			if (err < 0) {
+			fd = mlx4_mp_req_verbs_cmd_fd(eth_dev);
+			if (fd < 0) {
 				err = rte_errno;
 				goto err_secondary;
 			}
 			/* Remap UAR for Tx queues. */
-			err = mlx4_tx_uar_init_secondary(eth_dev, err);
+			err = mlx4_tx_uar_init_secondary(eth_dev, fd);
+			close(fd);
 			if (err) {
 				err = rte_errno;
 				goto err_secondary;
@@ -1014,11 +1030,8 @@ err_secondary:
 			      " (error: %s)", strerror(err));
 			goto port_error;
 		}
-		INFO("port %u MAC address is %02x:%02x:%02x:%02x:%02x:%02x",
-		     priv->port,
-		     mac.addr_bytes[0], mac.addr_bytes[1],
-		     mac.addr_bytes[2], mac.addr_bytes[3],
-		     mac.addr_bytes[4], mac.addr_bytes[5]);
+		INFO("port %u MAC address is " RTE_ETHER_ADDR_PRT_FMT,
+		     priv->port, RTE_ETHER_ADDR_BYTES(&mac));
 		/* Register MAC address. */
 		priv->mac[0] = mac;
 
@@ -1045,9 +1058,19 @@ err_secondary:
 		rte_eth_copy_pci_info(eth_dev, pci_dev);
 		eth_dev->data->dev_flags |= RTE_ETH_DEV_AUTOFILL_QUEUE_XSTATS;
 		/* Initialize local interrupt handle for current port. */
-		memset(&priv->intr_handle, 0, sizeof(struct rte_intr_handle));
-		priv->intr_handle.fd = -1;
-		priv->intr_handle.type = RTE_INTR_HANDLE_EXT;
+		priv->intr_handle =
+			rte_intr_instance_alloc(RTE_INTR_INSTANCE_F_SHARED);
+		if (priv->intr_handle == NULL) {
+			RTE_LOG(ERR, EAL, "Fail to allocate intr_handle\n");
+			goto port_error;
+		}
+
+		if (rte_intr_fd_set(priv->intr_handle, -1))
+			goto port_error;
+
+		if (rte_intr_type_set(priv->intr_handle, RTE_INTR_HANDLE_EXT))
+			goto port_error;
+
 		/*
 		 * Override ethdev interrupt handle pointer with private
 		 * handle instead of that of the parent PCI device used by
@@ -1060,7 +1083,7 @@ err_secondary:
 		 * besides setting up eth_dev->intr_handle, the rest is
 		 * handled by rte_intr_rx_ctl().
 		 */
-		eth_dev->intr_handle = &priv->intr_handle;
+		eth_dev->intr_handle = priv->intr_handle;
 		priv->dev_data = eth_dev->data;
 		eth_dev->dev_ops = &mlx4_dev_ops;
 #ifdef HAVE_IBV_MLX4_BUF_ALLOCATORS
@@ -1105,6 +1128,8 @@ err_secondary:
 		prev_dev = eth_dev;
 		continue;
 port_error:
+		if (priv != NULL)
+			rte_intr_instance_free(priv->intr_handle);
 		rte_free(priv);
 		if (eth_dev != NULL)
 			eth_dev->data->dev_private = NULL;
@@ -1320,7 +1345,7 @@ glue_error:
 #endif
 
 /* Initialize driver log type. */
-RTE_LOG_REGISTER(mlx4_logtype, pmd.net.mlx4, NOTICE)
+RTE_LOG_REGISTER_DEFAULT(mlx4_logtype, NOTICE)
 
 /**
  * Driver initialization routine.

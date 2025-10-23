@@ -43,8 +43,8 @@
 /*
  * Configurable number of RX/TX ring descriptors
  */
-#define RTE_TEST_RX_DESC_DEFAULT 1024
-#define RTE_TEST_TX_DESC_DEFAULT 1024
+#define RX_DESC_DEFAULT 1024
+#define TX_DESC_DEFAULT 1024
 
 #define MAX_TX_QUEUE_PER_PORT RTE_MAX_ETHPORTS
 #define MAX_RX_QUEUE_PER_PORT 128
@@ -56,8 +56,8 @@
 #define NB_SOCKETS 8
 
 /* Static global variables used within this file. */
-static uint16_t nb_rxd = RTE_TEST_RX_DESC_DEFAULT;
-static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
+static uint16_t nb_rxd = RX_DESC_DEFAULT;
+static uint16_t nb_txd = TX_DESC_DEFAULT;
 
 /**< Ports set in promiscuous mode off by default. */
 static int promiscuous_on;
@@ -78,7 +78,7 @@ static uint32_t enabled_port_mask;
 
 struct lcore_rx_queue {
 	uint16_t port_id;
-	uint8_t queue_id;
+	uint16_t queue_id;
 	char node_name[RTE_NODE_NAMESIZE];
 };
 
@@ -96,8 +96,8 @@ static struct lcore_conf lcore_conf[RTE_MAX_LCORE];
 
 struct lcore_params {
 	uint16_t port_id;
-	uint8_t queue_id;
-	uint8_t lcore_id;
+	uint16_t queue_id;
+	uint32_t lcore_id;
 } __rte_cache_aligned;
 
 static struct lcore_params lcore_params_array[MAX_LCORE_PARAMS];
@@ -111,20 +111,20 @@ static uint16_t nb_lcore_params = RTE_DIM(lcore_params_array_default);
 
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
-		.mq_mode = ETH_MQ_RX_RSS,
-		.max_rx_pkt_len = RTE_ETHER_MAX_LEN,
-		.split_hdr_size = 0,
+		.mq_mode = RTE_ETH_MQ_RX_RSS,
 	},
 	.rx_adv_conf = {
 		.rss_conf = {
 				.rss_key = NULL,
-				.rss_hf = ETH_RSS_IP,
+				.rss_hf = RTE_ETH_RSS_IP,
 		},
 	},
 	.txmode = {
-		.mq_mode = ETH_MQ_TX_NONE,
+		.mq_mode = RTE_ETH_MQ_TX_NONE,
 	},
 };
+
+static uint32_t max_pkt_len;
 
 static struct rte_mempool *pktmbuf_pool[RTE_MAX_ETHPORTS][NB_SOCKETS];
 
@@ -150,19 +150,19 @@ static struct ipv4_l3fwd_lpm_route ipv4_l3fwd_lpm_route_array[] = {
 static int
 check_lcore_params(void)
 {
-	uint8_t queue, lcore;
+	uint16_t queue, i;
 	int socketid;
-	uint16_t i;
+	uint32_t lcore;
 
 	for (i = 0; i < nb_lcore_params; ++i) {
 		queue = lcore_params[i].queue_id;
 		if (queue >= MAX_RX_QUEUE_PER_PORT) {
-			printf("Invalid queue number: %hhu\n", queue);
+			printf("Invalid queue number: %" PRIu16 "\n", queue);
 			return -1;
 		}
 		lcore = lcore_params[i].lcore_id;
 		if (!rte_lcore_is_enabled(lcore)) {
-			printf("Error: lcore %hhu is not enabled in lcore mask\n",
+			printf("Error: lcore %u is not enabled in lcore mask\n",
 			       lcore);
 			return -1;
 		}
@@ -173,7 +173,7 @@ check_lcore_params(void)
 		}
 		socketid = rte_lcore_to_socket_id(lcore);
 		if ((socketid != 0) && (numa_on == 0)) {
-			printf("Warning: lcore %hhu is on socket %d with numa off\n",
+			printf("Warning: lcore %u is on socket %d with numa off\n",
 			       lcore, socketid);
 		}
 	}
@@ -202,7 +202,7 @@ check_port_config(void)
 	return 0;
 }
 
-static uint8_t
+static uint16_t
 get_port_n_rx_queues(const uint16_t port)
 {
 	int queue = -1;
@@ -220,14 +220,14 @@ get_port_n_rx_queues(const uint16_t port)
 		}
 	}
 
-	return (uint8_t)(++queue);
+	return (uint16_t)(++queue);
 }
 
 static int
 init_lcore_rx_queues(void)
 {
 	uint16_t i, nb_rx_queue;
-	uint8_t lcore;
+	uint32_t lcore;
 
 	for (i = 0; i < nb_lcore_params; ++i) {
 		lcore = lcore_params[i].lcore_id;
@@ -235,7 +235,7 @@ init_lcore_rx_queues(void)
 		if (nb_rx_queue >= MAX_RX_QUEUE_PER_LCORE) {
 			printf("Error: too many queues (%u) for lcore: %u\n",
 			       (unsigned int)nb_rx_queue + 1,
-			       (unsigned int)lcore);
+			       lcore);
 			return -1;
 		}
 
@@ -259,7 +259,7 @@ print_usage(const char *prgname)
 		" [-P]"
 		" --config (port,queue,lcore)[,(port,queue,lcore)]"
 		" [--eth-dest=X,MM:MM:MM:MM:MM:MM]"
-		" [--enable-jumbo [--max-pkt-len PKTLEN]]"
+		" [--max-pkt-len PKTLEN]"
 		" [--no-numa]"
 		" [--per-port-pool]\n\n"
 
@@ -268,9 +268,7 @@ print_usage(const char *prgname)
 		"  --config (port,queue,lcore): Rx queue configuration\n"
 		"  --eth-dest=X,MM:MM:MM:MM:MM:MM: Ethernet destination for "
 		"port X\n"
-		"  --enable-jumbo: Enable jumbo frames\n"
-		"  --max-pkt-len: Under the premise of enabling jumbo,\n"
-		"                 maximum packet length in decimal (64-9600)\n"
+		"  --max-pkt-len PKTLEN: maximum packet length in decimal (64-9600)\n"
 		"  --no-numa: Disable numa awareness\n"
 		"  --per-port-pool: Use separate buffer pool per port\n\n",
 		prgname);
@@ -356,11 +354,11 @@ parse_config(const char *q_arg)
 		}
 
 		lcore_params_array[nb_lcore_params].port_id =
-			(uint8_t)int_fld[FLD_PORT];
+			(uint16_t)int_fld[FLD_PORT];
 		lcore_params_array[nb_lcore_params].queue_id =
-			(uint8_t)int_fld[FLD_QUEUE];
+			(uint16_t)int_fld[FLD_QUEUE];
 		lcore_params_array[nb_lcore_params].lcore_id =
-			(uint8_t)int_fld[FLD_LCORE];
+			(uint32_t)int_fld[FLD_LCORE];
 		++nb_lcore_params;
 	}
 	lcore_params = lcore_params_array;
@@ -404,7 +402,7 @@ static const char short_options[] = "p:" /* portmask */
 #define CMD_LINE_OPT_CONFIG	   "config"
 #define CMD_LINE_OPT_ETH_DEST	   "eth-dest"
 #define CMD_LINE_OPT_NO_NUMA	   "no-numa"
-#define CMD_LINE_OPT_ENABLE_JUMBO  "enable-jumbo"
+#define CMD_LINE_OPT_MAX_PKT_LEN   "max-pkt-len"
 #define CMD_LINE_OPT_PER_PORT_POOL "per-port-pool"
 enum {
 	/* Long options mapped to a short option */
@@ -416,7 +414,7 @@ enum {
 	CMD_LINE_OPT_CONFIG_NUM,
 	CMD_LINE_OPT_ETH_DEST_NUM,
 	CMD_LINE_OPT_NO_NUMA_NUM,
-	CMD_LINE_OPT_ENABLE_JUMBO_NUM,
+	CMD_LINE_OPT_MAX_PKT_LEN_NUM,
 	CMD_LINE_OPT_PARSE_PER_PORT_POOL,
 };
 
@@ -424,7 +422,7 @@ static const struct option lgopts[] = {
 	{CMD_LINE_OPT_CONFIG, 1, 0, CMD_LINE_OPT_CONFIG_NUM},
 	{CMD_LINE_OPT_ETH_DEST, 1, 0, CMD_LINE_OPT_ETH_DEST_NUM},
 	{CMD_LINE_OPT_NO_NUMA, 0, 0, CMD_LINE_OPT_NO_NUMA_NUM},
-	{CMD_LINE_OPT_ENABLE_JUMBO, 0, 0, CMD_LINE_OPT_ENABLE_JUMBO_NUM},
+	{CMD_LINE_OPT_MAX_PKT_LEN, 1, 0, CMD_LINE_OPT_MAX_PKT_LEN_NUM},
 	{CMD_LINE_OPT_PER_PORT_POOL, 0, 0, CMD_LINE_OPT_PARSE_PER_PORT_POOL},
 	{NULL, 0, 0, 0},
 };
@@ -490,28 +488,8 @@ parse_args(int argc, char **argv)
 			numa_on = 0;
 			break;
 
-		case CMD_LINE_OPT_ENABLE_JUMBO_NUM: {
-			const struct option lenopts = {"max-pkt-len",
-						       required_argument, 0, 0};
-
-			port_conf.rxmode.offloads |= DEV_RX_OFFLOAD_JUMBO_FRAME;
-			port_conf.txmode.offloads |= DEV_TX_OFFLOAD_MULTI_SEGS;
-
-			/*
-			 * if no max-pkt-len set, use the default
-			 * value RTE_ETHER_MAX_LEN.
-			 */
-			if (getopt_long(argc, argvopt, "", &lenopts,
-					&option_index) == 0) {
-				ret = parse_max_pkt_len(optarg);
-				if (ret < 64 || ret > MAX_JUMBO_PKT_LEN) {
-					fprintf(stderr, "Invalid maximum "
-							"packet length\n");
-					print_usage(prgname);
-					return -1;
-				}
-				port_conf.rxmode.max_rx_pkt_len = ret;
-			}
+		case CMD_LINE_OPT_MAX_PKT_LEN_NUM: {
+			max_pkt_len = parse_max_pkt_len(optarg);
 			break;
 		}
 
@@ -628,7 +606,7 @@ check_all_ports_link_status(uint32_t port_mask)
 				continue;
 			}
 			/* Clear all_ports_up flag if any link down */
-			if (link.link_status == ETH_LINK_DOWN) {
+			if (link.link_status == RTE_ETH_LINK_DOWN) {
 				all_ports_up = 0;
 				break;
 			}
@@ -691,7 +669,7 @@ print_stats(void)
 	rte_graph_cluster_stats_destroy(stats);
 }
 
-/* Main processing loop */
+/* Main processing loop. 8< */
 static int
 graph_main_loop(void *conf)
 {
@@ -720,18 +698,56 @@ graph_main_loop(void *conf)
 
 	return 0;
 }
+/* >8 End of main processing loop. */
+
+static uint32_t
+eth_dev_get_overhead_len(uint32_t max_rx_pktlen, uint16_t max_mtu)
+{
+	uint32_t overhead_len;
+
+	if (max_mtu != UINT16_MAX && max_rx_pktlen > max_mtu)
+		overhead_len = max_rx_pktlen - max_mtu;
+	else
+		overhead_len = RTE_ETHER_HDR_LEN + RTE_ETHER_CRC_LEN;
+
+	return overhead_len;
+}
+
+static int
+config_port_max_pkt_len(struct rte_eth_conf *conf,
+		struct rte_eth_dev_info *dev_info)
+{
+	uint32_t overhead_len;
+
+	if (max_pkt_len == 0)
+		return 0;
+
+	if (max_pkt_len < RTE_ETHER_MIN_LEN || max_pkt_len > MAX_JUMBO_PKT_LEN)
+		return -1;
+
+	overhead_len = eth_dev_get_overhead_len(dev_info->max_rx_pktlen,
+			dev_info->max_mtu);
+	conf->rxmode.mtu = max_pkt_len - overhead_len;
+
+	if (conf->rxmode.mtu > RTE_ETHER_MTU)
+		conf->txmode.offloads |= RTE_ETH_TX_OFFLOAD_MULTI_SEGS;
+
+	return 0;
+}
 
 int
 main(int argc, char **argv)
 {
 	/* Rewrite data of src and dst ether addr */
 	uint8_t rewrite_data[2 * sizeof(struct rte_ether_addr)];
+	/* Graph initialization. 8< */
 	static const char * const default_patterns[] = {
 		"ip4*",
 		"ethdev_tx-*",
 		"pkt_drop",
 	};
-	uint8_t nb_rx_queue, queue, socketid;
+	uint8_t socketid;
+	uint16_t nb_rx_queue, queue;
 	struct rte_graph_param graph_conf;
 	struct rte_eth_dev_info dev_info;
 	uint32_t nb_ports, nb_conf = 0;
@@ -782,7 +798,7 @@ main(int argc, char **argv)
 	nb_ports = rte_eth_dev_count_avail();
 	nb_lcores = rte_lcore_count();
 
-	/* Initialize all ports */
+	/* Initialize all ports. 8< */
 	RTE_ETH_FOREACH_DEV(portid)
 	{
 		struct rte_eth_conf local_port_conf = port_conf;
@@ -805,9 +821,16 @@ main(int argc, char **argv)
 		       nb_rx_queue, n_tx_queue);
 
 		rte_eth_dev_info_get(portid, &dev_info);
-		if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
+
+		ret = config_port_max_pkt_len(&local_port_conf, &dev_info);
+		if (ret != 0)
+			rte_exit(EXIT_FAILURE,
+				"Invalid max packet length: %u (port %u)\n",
+				max_pkt_len, portid);
+
+		if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
 			local_port_conf.txmode.offloads |=
-				DEV_TX_OFFLOAD_MBUF_FAST_FREE;
+				RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
 
 		local_port_conf.rx_adv_conf.rss_conf.rss_hf &=
 			dev_info.flow_type_rss_offloads;
@@ -962,6 +985,7 @@ main(int argc, char **argv)
 
 	/* Ethdev node config, skip rx queue mapping */
 	ret = rte_node_eth_config(ethdev_conf, nb_conf, nb_graphs);
+	/* >8 End of graph creation. */
 	if (ret)
 		rte_exit(EXIT_FAILURE, "rte_node_eth_config: err=%d\n", ret);
 
@@ -1037,6 +1061,7 @@ main(int argc, char **argv)
 
 		qconf->graph_id = graph_id;
 		qconf->graph = rte_graph_lookup(qconf->name);
+		/* >8 End of graph initialization. */
 		if (!qconf->graph)
 			rte_exit(EXIT_FAILURE,
 				 "rte_graph_lookup(): graph %s not found\n",
@@ -1046,7 +1071,7 @@ main(int argc, char **argv)
 	memset(&rewrite_data, 0, sizeof(rewrite_data));
 	rewrite_len = sizeof(rewrite_data);
 
-	/* Add route to ip4 graph infra */
+	/* Add route to ip4 graph infra. 8< */
 	for (i = 0; i < IPV4_L3FWD_LPM_NUM_ROUTES; i++) {
 		char route_str[INET6_ADDRSTRLEN * 4];
 		char abuf[INET6_ADDRSTRLEN];
@@ -1090,6 +1115,7 @@ main(int argc, char **argv)
 		RTE_LOG(INFO, L3FWD_GRAPH, "Added route %s, next_hop %u\n",
 			route_str, i);
 	}
+	/* >8 End of adding route to ip4 graph infa. */
 
 	/* Launch per-lcore init on every worker lcore */
 	rte_eal_mp_remote_launch(graph_main_loop, NULL, SKIP_MAIN);

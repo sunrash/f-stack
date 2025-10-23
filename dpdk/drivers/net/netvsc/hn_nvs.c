@@ -28,8 +28,8 @@
 #include <rte_cycles.h>
 #include <rte_memory.h>
 #include <rte_eal.h>
-#include <rte_dev.h>
-#include <rte_bus_vmbus.h>
+#include <dev_driver.h>
+#include <bus_vmbus_driver.h>
 
 #include "hn_logs.h"
 #include "hn_var.h"
@@ -574,7 +574,7 @@ hn_nvs_alloc_subchans(struct hn_data *hv, uint32_t *nsubch)
 	return 0;
 }
 
-void
+int
 hn_nvs_set_datapath(struct hn_data *hv, uint32_t path)
 {
 	struct hn_nvs_datapath dp;
@@ -593,4 +593,6 @@ hn_nvs_set_datapath(struct hn_data *hv, uint32_t path)
 			    "send set datapath failed: %d",
 			    error);
 	}
+
+	return error;
 }

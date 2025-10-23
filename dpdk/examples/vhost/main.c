@@ -2,6 +2,7 @@
  * Copyright(c) 2010-2017 Intel Corporation
  */
 
+#include <ctype.h>
 #include <arpa/inet.h>
 #include <getopt.h>
 #include <linux/if_ether.h>
@@ -10,11 +11,11 @@
 #include <linux/virtio_ring.h>
 #include <signal.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <sys/eventfd.h>
 #include <sys/param.h>
 #include <unistd.h>
 
-#include <rte_atomic.h>
 #include <rte_cycles.h>
 #include <rte_ethdev.h>
 #include <rte_log.h>
@@ -25,8 +26,9 @@
 #include <rte_ip.h>
 #include <rte_tcp.h>
 #include <rte_pause.h>
+#include <rte_dmadev.h>
+#include <rte_vhost_async.h>
 
-#include "ioat.h"
 #include "main.h"
 
 #ifndef MAX_QUEUES
@@ -47,6 +49,7 @@
 #define BURST_RX_RETRIES 4		/* Number of retries on RX. */
 
 #define JUMBO_FRAME_MAX_SIZE    0x2600
+#define MAX_MTU (JUMBO_FRAME_MAX_SIZE - (RTE_ETHER_HDR_LEN + RTE_ETHER_CRC_LEN))
 
 /* State of virtio device. */
 #define DEVICE_MAC_LEARNING 0
@@ -54,16 +57,23 @@
 #define DEVICE_SAFE_REMOVE	2
 
 /* Configurable number of RX/TX ring descriptors */
-#define RTE_TEST_RX_DESC_DEFAULT 1024
-#define RTE_TEST_TX_DESC_DEFAULT 512
+#define RX_DESC_DEFAULT 1024
+#define TX_DESC_DEFAULT 512
 
 #define INVALID_PORT_ID 0xFF
+#define INVALID_DMA_ID -1
 
-/* Maximum long option length for option parsing. */
-#define MAX_LONG_OPT_SZ 64
+#define DMA_RING_SIZE 4096
+
+#define ASYNC_ENQUEUE_VHOST 1
+#define ASYNC_DEQUEUE_VHOST 2
 
 /* number of mbufs in all pools - if specified on command-line. */
 static int total_num_mbufs = NUM_MBUFS_DEFAULT;
+
+struct dma_for_vhost dma_bind[RTE_MAX_VHOST_DEVICE];
+int16_t dmas_id[RTE_DMADEV_DEFAULT_MAX];
+static int dma_count;
 
 /* mask of enabled ports */
 static uint32_t enabled_port_mask = 0;
@@ -102,10 +112,6 @@ static int client_mode;
 
 static int builtin_net_driver;
 
-static int async_vhost_driver;
-
-static char dma_type[MAX_LONG_OPT_SZ];
-
 /* Specify timeout (in useconds) between retries on RX. */
 static uint32_t burst_rx_delay_time = BURST_RX_WAIT_US;
 /* Specify the number of retries on RX. */
@@ -115,26 +121,27 @@ static uint32_t burst_rx_retry_num = BURST_RX_RETRIES;
 static char *socket_files;
 static int nb_sockets;
 
+static struct vhost_queue_ops vdev_queue_ops[RTE_MAX_VHOST_DEVICE];
+
 /* empty VMDq configuration structure. Filled in programmatically */
 static struct rte_eth_conf vmdq_conf_default = {
 	.rxmode = {
-		.mq_mode        = ETH_MQ_RX_VMDQ_ONLY,
-		.split_hdr_size = 0,
+		.mq_mode        = RTE_ETH_MQ_RX_VMDQ_ONLY,
 		/*
 		 * VLAN strip is necessary for 1G NIC such as I350,
 		 * this fixes bug of ipv4 forwarding in guest can't
 		 * forward packets from one virtio dev to another virtio dev.
 		 */
-		.offloads = DEV_RX_OFFLOAD_VLAN_STRIP,
+		.offloads = RTE_ETH_RX_OFFLOAD_VLAN_STRIP,
 	},
 
 	.txmode = {
-		.mq_mode = ETH_MQ_TX_NONE,
-		.offloads = (DEV_TX_OFFLOAD_IPV4_CKSUM |
-			     DEV_TX_OFFLOAD_TCP_CKSUM |
-			     DEV_TX_OFFLOAD_VLAN_INSERT |
-			     DEV_TX_OFFLOAD_MULTI_SEGS |
-			     DEV_TX_OFFLOAD_TCP_TSO),
+		.mq_mode = RTE_ETH_MQ_TX_NONE,
+		.offloads = (RTE_ETH_TX_OFFLOAD_IPV4_CKSUM |
+			     RTE_ETH_TX_OFFLOAD_TCP_CKSUM |
+			     RTE_ETH_TX_OFFLOAD_VLAN_INSERT |
+			     RTE_ETH_TX_OFFLOAD_MULTI_SEGS |
+			     RTE_ETH_TX_OFFLOAD_TCP_TSO),
 	},
 	.rx_adv_conf = {
 		/*
@@ -142,7 +149,7 @@ static struct rte_eth_conf vmdq_conf_default = {
 		 * appropriate values
 		 */
 		.vmdq_rx_conf = {
-			.nb_queue_pools = ETH_8_POOLS,
+			.nb_queue_pools = RTE_ETH_8_POOLS,
 			.enable_default_pool = 0,
 			.default_pool = 0,
 			.nb_pool_maps = 0,
@@ -185,20 +192,193 @@ struct mbuf_table {
 	struct rte_mbuf *m_table[MAX_PKT_BURST];
 };
 
+struct vhost_bufftable {
+	uint32_t len;
+	uint64_t pre_tsc;
+	struct rte_mbuf *m_table[MAX_PKT_BURST];
+};
+
 /* TX queue for each data core. */
 struct mbuf_table lcore_tx_queue[RTE_MAX_LCORE];
 
+/*
+ * Vhost TX buffer for each data core.
+ * Every data core maintains a TX buffer for every vhost device,
+ * which is used for batch pkts enqueue for higher performance.
+ */
+struct vhost_bufftable *vhost_txbuff[RTE_MAX_LCORE * RTE_MAX_VHOST_DEVICE];
+
 #define MBUF_TABLE_DRAIN_TSC	((rte_get_tsc_hz() + US_PER_S - 1) \
 				 / US_PER_S * BURST_TX_DRAIN_US)
-#define VLAN_HLEN       4
+
+static int vid2socketid[RTE_MAX_VHOST_DEVICE];
+
+static inline uint32_t
+get_async_flag_by_socketid(int socketid)
+{
+	return dma_bind[socketid].async_flag;
+}
+
+static inline void
+init_vid2socketid_array(int vid, int socketid)
+{
+	vid2socketid[vid] = socketid;
+}
+
+static inline bool
+is_dma_configured(int16_t dev_id)
+{
+	int i;
+
+	for (i = 0; i < dma_count; i++)
+		if (dmas_id[i] == dev_id)
+			return true;
+	return false;
+}
 
 static inline int
 open_dma(const char *value)
 {
-	if (strncmp(dma_type, "ioat", 4) == 0)
-		return open_ioat(value);
+	struct dma_for_vhost *dma_info = dma_bind;
+	char *input = strndup(value, strlen(value) + 1);
+	char *addrs = input;
+	char *ptrs[2];
+	char *start, *end, *substr;
+	int64_t socketid, vring_id;
 
-	return -1;
+	struct rte_dma_info info;
+	struct rte_dma_conf dev_config = { .nb_vchans = 1 };
+	struct rte_dma_vchan_conf qconf = {
+		.direction = RTE_DMA_DIR_MEM_TO_MEM,
+		.nb_desc = DMA_RING_SIZE
+	};
+
+	int dev_id;
+	int ret = 0;
+	uint16_t i = 0;
+	char *dma_arg[RTE_MAX_VHOST_DEVICE];
+	int args_nr;
+
+	if (input == NULL)
+		return -1;
+
+	while (isblank(*addrs))
+		addrs++;
+	if (*addrs == '\0') {
+		ret = -1;
+		goto out;
+	}
+
+	/* process DMA devices within bracket. */
+	addrs++;
+	substr = strtok(addrs, ";]");
+	if (!substr) {
+		ret = -1;
+		goto out;
+	}
+
+	args_nr = rte_strsplit(substr, strlen(substr), dma_arg, RTE_MAX_VHOST_DEVICE, ',');
+	if (args_nr <= 0) {
+		ret = -1;
+		goto out;
+	}
+
+	while (i < args_nr) {
+		char *arg_temp = dma_arg[i];
+		char *txd, *rxd;
+		uint8_t sub_nr;
+		int async_flag;
+
+		sub_nr = rte_strsplit(arg_temp, strlen(arg_temp), ptrs, 2, '@');
+		if (sub_nr != 2) {
+			ret = -1;
+			goto out;
+		}
+
+		txd = strstr(ptrs[0], "txd");
+		rxd = strstr(ptrs[0], "rxd");
+		if (txd) {
+			start = txd;
+			vring_id = VIRTIO_RXQ;
+			async_flag = ASYNC_ENQUEUE_VHOST;
+		} else if (rxd) {
+			start = rxd;
+			vring_id = VIRTIO_TXQ;
+			async_flag = ASYNC_DEQUEUE_VHOST;
+		} else {
+			ret = -1;
+			goto out;
+		}
+
+		start += 3;
+		socketid = strtol(start, &end, 0);
+		if (end == start) {
+			ret = -1;
+			goto out;
+		}
+
+		dev_id = rte_dma_get_dev_id_by_name(ptrs[1]);
+		if (dev_id < 0) {
+			RTE_LOG(ERR, VHOST_CONFIG, "Fail to find DMA %s.\n", ptrs[1]);
+			ret = -1;
+			goto out;
+		}
+
+		/* DMA device is already configured, so skip */
+		if (is_dma_configured(dev_id))
+			goto done;
+
+		if (rte_dma_info_get(dev_id, &info) != 0) {
+			RTE_LOG(ERR, VHOST_CONFIG, "Error with rte_dma_info_get()\n");
+			ret = -1;
+			goto out;
+		}
+
+		if (info.max_vchans < 1) {
+			RTE_LOG(ERR, VHOST_CONFIG, "No channels available on device %d\n", dev_id);
+			ret = -1;
+			goto out;
+		}
+
+		if (rte_dma_configure(dev_id, &dev_config) != 0) {
+			RTE_LOG(ERR, VHOST_CONFIG, "Fail to configure DMA %d.\n", dev_id);
+			ret = -1;
+			goto out;
+		}
+
+		/* Check the max desc supported by DMA device */
+		rte_dma_info_get(dev_id, &info);
+		if (info.nb_vchans != 1) {
+			RTE_LOG(ERR, VHOST_CONFIG, "No configured queues reported by DMA %d.\n",
+					dev_id);
+			ret = -1;
+			goto out;
+		}
+
+		qconf.nb_desc = RTE_MIN(DMA_RING_SIZE, info.max_desc);
+
+		if (rte_dma_vchan_setup(dev_id, 0, &qconf) != 0) {
+			RTE_LOG(ERR, VHOST_CONFIG, "Fail to set up DMA %d.\n", dev_id);
+			ret = -1;
+			goto out;
+		}
+
+		if (rte_dma_start(dev_id) != 0) {
+			RTE_LOG(ERR, VHOST_CONFIG, "Fail to start DMA %u.\n", dev_id);
+			ret = -1;
+			goto out;
+		}
+
+		dmas_id[dma_count++] = dev_id;
+
+done:
+		(dma_info + socketid)->dmas[vring_id].dev_id = dev_id;
+		(dma_info + socketid)->async_flag |= async_flag;
+		i++;
+	}
+out:
+	free(input);
+	return ret;
 }
 
 /*
@@ -267,10 +447,17 @@ port_init(uint16_t port)
 	/*configure the number of supported virtio devices based on VMDQ limits */
 	num_devices = dev_info.max_vmdq_pools;
 
-	rx_ring_size = RTE_TEST_RX_DESC_DEFAULT;
-	tx_ring_size = RTE_TEST_TX_DESC_DEFAULT;
+	rx_ring_size = RX_DESC_DEFAULT;
+	tx_ring_size = TX_DESC_DEFAULT;
 
 	tx_rings = (uint16_t)rte_lcore_count();
+
+	if (mergeable) {
+		if (dev_info.max_mtu != UINT16_MAX && dev_info.max_rx_pktlen > dev_info.max_mtu)
+			vmdq_conf_default.rxmode.mtu = dev_info.max_mtu;
+		else
+			vmdq_conf_default.rxmode.mtu = MAX_MTU;
+	}
 
 	/* Get port configuration. */
 	retval = get_eth_conf(&port_conf, num_devices);
@@ -290,9 +477,9 @@ port_init(uint16_t port)
 		return -1;
 
 	rx_rings = (uint16_t)dev_info.max_rx_queues;
-	if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
+	if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
 		port_conf.txmode.offloads |=
-			DEV_TX_OFFLOAD_MBUF_FAST_FREE;
+			RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
 	/* Configure ethernet device. */
 	retval = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_conf);
 	if (retval != 0) {
@@ -308,7 +495,7 @@ port_init(uint16_t port)
 			"for port %u: %s.\n", port, strerror(-retval));
 		return retval;
 	}
-	if (rx_ring_size > RTE_TEST_RX_DESC_DEFAULT) {
+	if (rx_ring_size > RX_DESC_DEFAULT) {
 		RTE_LOG(ERR, VHOST_PORT, "Mbuf pool has an insufficient size "
 			"for Rx queues on port %u.\n", port);
 		return -1;
@@ -369,14 +556,8 @@ port_init(uint16_t port)
 
 	RTE_LOG(INFO, VHOST_PORT, "Max virtio devices supported: %u\n", num_devices);
 	RTE_LOG(INFO, VHOST_PORT, "Port %u MAC: %02"PRIx8" %02"PRIx8" %02"PRIx8
-			" %02"PRIx8" %02"PRIx8" %02"PRIx8"\n",
-			port,
-			vmdq_ports_eth_addr[port].addr_bytes[0],
-			vmdq_ports_eth_addr[port].addr_bytes[1],
-			vmdq_ports_eth_addr[port].addr_bytes[2],
-			vmdq_ports_eth_addr[port].addr_bytes[3],
-			vmdq_ports_eth_addr[port].addr_bytes[4],
-			vmdq_ports_eth_addr[port].addr_bytes[5]);
+		" %02"PRIx8" %02"PRIx8" %02"PRIx8"\n",
+		port, RTE_ETHER_ADDR_BYTES(&vmdq_ports_eth_addr[port]));
 
 	return 0;
 }
@@ -457,9 +638,8 @@ us_vhost_usage(const char *prgname)
 {
 	RTE_LOG(INFO, VHOST_CONFIG, "%s [EAL options] -- -p PORTMASK\n"
 	"		--vm2vm [0|1|2]\n"
-	"		--rx_retry [0|1] --mergeable [0|1] --stats [0-N]\n"
+	"		--rx-retry [0|1] --mergeable [0|1] --stats [0-N]\n"
 	"		--socket-file <path>\n"
-	"		--nb-devices ND\n"
 	"		-p PORTMASK: Set mask for ports to be used by application\n"
 	"		--vm2vm [0|1|2]: disable/software(default)/hardware vm2vm comms\n"
 	"		--rx-retry [0|1]: disable/enable(default) retries on Rx. Enable retry if destination queue is full\n"
@@ -468,14 +648,43 @@ us_vhost_usage(const char *prgname)
 	"		--mergeable [0|1]: disable(default)/enable RX mergeable buffers\n"
 	"		--stats [0-N]: 0: Disable stats, N: Time in seconds to print stats\n"
 	"		--socket-file: The path of the socket file.\n"
-	"		--tx-csum [0|1] disable/enable TX checksum offload.\n"
-	"		--tso [0|1] disable/enable TCP segment offload.\n"
-	"		--client register a vhost-user socket as client mode.\n"
-	"		--dma-type register dma type for your vhost async driver. For example \"ioat\" for now.\n"
-	"		--dmas register dma channel for specific vhost device.\n"
-	"		--total-num-mbufs [0-N] set the number of mbufs to be allocated in mbuf pools, the default value is 147456.\n",
+	"		--tx-csum [0|1]: disable/enable TX checksum offload.\n"
+	"		--tso [0|1]: disable/enable TCP segment offload.\n"
+	"		--client: register a vhost-user socket as client mode.\n"
+	"		--dmas: register dma channel for specific vhost device.\n"
+	"		--total-num-mbufs [0-N]: set the number of mbufs to be allocated in mbuf pools, the default value is 147456.\n"
+	"		--builtin-net-driver: enable simple vhost-user net driver\n",
 	       prgname);
 }
+
+enum {
+#define OPT_VM2VM               "vm2vm"
+	OPT_VM2VM_NUM = 256,
+#define OPT_RX_RETRY            "rx-retry"
+	OPT_RX_RETRY_NUM,
+#define OPT_RX_RETRY_DELAY      "rx-retry-delay"
+	OPT_RX_RETRY_DELAY_NUM,
+#define OPT_RX_RETRY_NUMB       "rx-retry-num"
+	OPT_RX_RETRY_NUMB_NUM,
+#define OPT_MERGEABLE           "mergeable"
+	OPT_MERGEABLE_NUM,
+#define OPT_STATS               "stats"
+	OPT_STATS_NUM,
+#define OPT_SOCKET_FILE         "socket-file"
+	OPT_SOCKET_FILE_NUM,
+#define OPT_TX_CSUM             "tx-csum"
+	OPT_TX_CSUM_NUM,
+#define OPT_TSO                 "tso"
+	OPT_TSO_NUM,
+#define OPT_CLIENT              "client"
+	OPT_CLIENT_NUM,
+#define OPT_BUILTIN_NET_DRIVER  "builtin-net-driver"
+	OPT_BUILTIN_NET_DRIVER_NUM,
+#define OPT_DMAS                "dmas"
+	OPT_DMAS_NUM,
+#define OPT_NUM_MBUFS           "total-num-mbufs"
+	OPT_NUM_MBUFS_NUM,
+};
 
 /*
  * Parse the arguments given in the command line of the application.
@@ -488,20 +697,33 @@ us_vhost_parse_args(int argc, char **argv)
 	unsigned i;
 	const char *prgname = argv[0];
 	static struct option long_option[] = {
-		{"vm2vm", required_argument, NULL, 0},
-		{"rx-retry", required_argument, NULL, 0},
-		{"rx-retry-delay", required_argument, NULL, 0},
-		{"rx-retry-num", required_argument, NULL, 0},
-		{"mergeable", required_argument, NULL, 0},
-		{"stats", required_argument, NULL, 0},
-		{"socket-file", required_argument, NULL, 0},
-		{"tx-csum", required_argument, NULL, 0},
-		{"tso", required_argument, NULL, 0},
-		{"client", no_argument, &client_mode, 1},
-		{"builtin-net-driver", no_argument, &builtin_net_driver, 1},
-		{"dma-type", required_argument, NULL, 0},
-		{"dmas", required_argument, NULL, 0},
-		{"total-num-mbufs", required_argument, NULL, 0},
+		{OPT_VM2VM, required_argument,
+				NULL, OPT_VM2VM_NUM},
+		{OPT_RX_RETRY, required_argument,
+				NULL, OPT_RX_RETRY_NUM},
+		{OPT_RX_RETRY_DELAY, required_argument,
+				NULL, OPT_RX_RETRY_DELAY_NUM},
+		{OPT_RX_RETRY_NUMB, required_argument,
+				NULL, OPT_RX_RETRY_NUMB_NUM},
+		{OPT_MERGEABLE, required_argument,
+				NULL, OPT_MERGEABLE_NUM},
+		{OPT_STATS, required_argument,
+				NULL, OPT_STATS_NUM},
+		{OPT_SOCKET_FILE, required_argument,
+				NULL, OPT_SOCKET_FILE_NUM},
+		{OPT_TX_CSUM, required_argument,
+				NULL, OPT_TX_CSUM_NUM},
+		{OPT_TSO, required_argument,
+				NULL, OPT_TSO_NUM},
+		{OPT_CLIENT, no_argument,
+				NULL, OPT_CLIENT_NUM},
+		{OPT_BUILTIN_NET_DRIVER, no_argument,
+				NULL, OPT_BUILTIN_NET_DRIVER_NUM},
+		{OPT_DMAS, required_argument,
+				NULL, OPT_DMAS_NUM},
+		{OPT_NUM_MBUFS, required_argument,
+				NULL, OPT_NUM_MBUFS_NUM},
+		{NULL, 0, 0, 0},
 	};
 
 	/* Parse command line */
@@ -521,168 +743,135 @@ us_vhost_parse_args(int argc, char **argv)
 		case 'P':
 			promiscuous = 1;
 			vmdq_conf_default.rx_adv_conf.vmdq_rx_conf.rx_mode =
-				ETH_VMDQ_ACCEPT_BROADCAST |
-				ETH_VMDQ_ACCEPT_MULTICAST;
-
+				RTE_ETH_VMDQ_ACCEPT_BROADCAST |
+				RTE_ETH_VMDQ_ACCEPT_MULTICAST;
 			break;
 
-		case 0:
-			/* Enable/disable vm2vm comms. */
-			if (!strncmp(long_option[option_index].name, "vm2vm",
-				MAX_LONG_OPT_SZ)) {
-				ret = parse_num_opt(optarg, (VM2VM_LAST - 1));
-				if (ret == -1) {
-					RTE_LOG(INFO, VHOST_CONFIG,
-						"Invalid argument for "
-						"vm2vm [0|1|2]\n");
-					us_vhost_usage(prgname);
-					return -1;
-				} else {
-					vm2vm_mode = (vm2vm_type)ret;
-				}
+		case OPT_VM2VM_NUM:
+			ret = parse_num_opt(optarg, (VM2VM_LAST - 1));
+			if (ret == -1) {
+				RTE_LOG(INFO, VHOST_CONFIG,
+					"Invalid argument for "
+					"vm2vm [0|1|2]\n");
+				us_vhost_usage(prgname);
+				return -1;
 			}
-
-			/* Enable/disable retries on RX. */
-			if (!strncmp(long_option[option_index].name, "rx-retry", MAX_LONG_OPT_SZ)) {
-				ret = parse_num_opt(optarg, 1);
-				if (ret == -1) {
-					RTE_LOG(INFO, VHOST_CONFIG, "Invalid argument for rx-retry [0|1]\n");
-					us_vhost_usage(prgname);
-					return -1;
-				} else {
-					enable_retry = ret;
-				}
-			}
-
-			/* Enable/disable TX checksum offload. */
-			if (!strncmp(long_option[option_index].name, "tx-csum", MAX_LONG_OPT_SZ)) {
-				ret = parse_num_opt(optarg, 1);
-				if (ret == -1) {
-					RTE_LOG(INFO, VHOST_CONFIG, "Invalid argument for tx-csum [0|1]\n");
-					us_vhost_usage(prgname);
-					return -1;
-				} else
-					enable_tx_csum = ret;
-			}
-
-			/* Enable/disable TSO offload. */
-			if (!strncmp(long_option[option_index].name, "tso", MAX_LONG_OPT_SZ)) {
-				ret = parse_num_opt(optarg, 1);
-				if (ret == -1) {
-					RTE_LOG(INFO, VHOST_CONFIG, "Invalid argument for tso [0|1]\n");
-					us_vhost_usage(prgname);
-					return -1;
-				} else
-					enable_tso = ret;
-			}
-
-			/* Specify the retries delay time (in useconds) on RX. */
-			if (!strncmp(long_option[option_index].name, "rx-retry-delay", MAX_LONG_OPT_SZ)) {
-				ret = parse_num_opt(optarg, INT32_MAX);
-				if (ret == -1) {
-					RTE_LOG(INFO, VHOST_CONFIG, "Invalid argument for rx-retry-delay [0-N]\n");
-					us_vhost_usage(prgname);
-					return -1;
-				} else {
-					burst_rx_delay_time = ret;
-				}
-			}
-
-			/* Specify the retries number on RX. */
-			if (!strncmp(long_option[option_index].name, "rx-retry-num", MAX_LONG_OPT_SZ)) {
-				ret = parse_num_opt(optarg, INT32_MAX);
-				if (ret == -1) {
-					RTE_LOG(INFO, VHOST_CONFIG, "Invalid argument for rx-retry-num [0-N]\n");
-					us_vhost_usage(prgname);
-					return -1;
-				} else {
-					burst_rx_retry_num = ret;
-				}
-			}
-
-			/* Enable/disable RX mergeable buffers. */
-			if (!strncmp(long_option[option_index].name, "mergeable", MAX_LONG_OPT_SZ)) {
-				ret = parse_num_opt(optarg, 1);
-				if (ret == -1) {
-					RTE_LOG(INFO, VHOST_CONFIG, "Invalid argument for mergeable [0|1]\n");
-					us_vhost_usage(prgname);
-					return -1;
-				} else {
-					mergeable = !!ret;
-					if (ret) {
-						vmdq_conf_default.rxmode.offloads |=
-							DEV_RX_OFFLOAD_JUMBO_FRAME;
-						vmdq_conf_default.rxmode.max_rx_pkt_len
-							= JUMBO_FRAME_MAX_SIZE;
-					}
-				}
-			}
-
-			/* Enable/disable stats. */
-			if (!strncmp(long_option[option_index].name, "stats", MAX_LONG_OPT_SZ)) {
-				ret = parse_num_opt(optarg, INT32_MAX);
-				if (ret == -1) {
-					RTE_LOG(INFO, VHOST_CONFIG,
-						"Invalid argument for stats [0..N]\n");
-					us_vhost_usage(prgname);
-					return -1;
-				} else {
-					enable_stats = ret;
-				}
-			}
-
-			/* Set socket file path. */
-			if (!strncmp(long_option[option_index].name,
-						"socket-file", MAX_LONG_OPT_SZ)) {
-				if (us_vhost_parse_socket_path(optarg) == -1) {
-					RTE_LOG(INFO, VHOST_CONFIG,
-					"Invalid argument for socket name (Max %d characters)\n",
-					PATH_MAX);
-					us_vhost_usage(prgname);
-					return -1;
-				}
-			}
-
-			if (!strncmp(long_option[option_index].name,
-						"dma-type", MAX_LONG_OPT_SZ)) {
-				if (strlen(optarg) >= MAX_LONG_OPT_SZ) {
-					RTE_LOG(INFO, VHOST_CONFIG,
-						"Wrong DMA type\n");
-					us_vhost_usage(prgname);
-					return -1;
-				}
-				strcpy(dma_type, optarg);
-			}
-
-			if (!strncmp(long_option[option_index].name,
-						"dmas", MAX_LONG_OPT_SZ)) {
-				if (open_dma(optarg) == -1) {
-					RTE_LOG(INFO, VHOST_CONFIG,
-						"Wrong DMA args\n");
-					us_vhost_usage(prgname);
-					return -1;
-				}
-				async_vhost_driver = 1;
-			}
-
-
-			if (!strncmp(long_option[option_index].name,
-						"total-num-mbufs", MAX_LONG_OPT_SZ)) {
-				ret = parse_num_opt(optarg, INT32_MAX);
-				if (ret == -1) {
-					RTE_LOG(INFO, VHOST_CONFIG,
-						"Invalid argument for total-num-mbufs [0..N]\n");
-					us_vhost_usage(prgname);
-					return -1;
-				}
-
-				if (total_num_mbufs < ret)
-					total_num_mbufs = ret;
-			}
-
+			vm2vm_mode = (vm2vm_type)ret;
 			break;
 
-			/* Invalid option - print options. */
+		case OPT_RX_RETRY_NUM:
+			ret = parse_num_opt(optarg, 1);
+			if (ret == -1) {
+				RTE_LOG(INFO, VHOST_CONFIG, "Invalid argument for rx-retry [0|1]\n");
+				us_vhost_usage(prgname);
+				return -1;
+			}
+			enable_retry = ret;
+			break;
+
+		case OPT_TX_CSUM_NUM:
+			ret = parse_num_opt(optarg, 1);
+			if (ret == -1) {
+				RTE_LOG(INFO, VHOST_CONFIG, "Invalid argument for tx-csum [0|1]\n");
+				us_vhost_usage(prgname);
+				return -1;
+			}
+			enable_tx_csum = ret;
+			break;
+
+		case OPT_TSO_NUM:
+			ret = parse_num_opt(optarg, 1);
+			if (ret == -1) {
+				RTE_LOG(INFO, VHOST_CONFIG, "Invalid argument for tso [0|1]\n");
+				us_vhost_usage(prgname);
+				return -1;
+			}
+			enable_tso = ret;
+			break;
+
+		case OPT_RX_RETRY_DELAY_NUM:
+			ret = parse_num_opt(optarg, INT32_MAX);
+			if (ret == -1) {
+				RTE_LOG(INFO, VHOST_CONFIG, "Invalid argument for rx-retry-delay [0-N]\n");
+				us_vhost_usage(prgname);
+				return -1;
+			}
+			burst_rx_delay_time = ret;
+			break;
+
+		case OPT_RX_RETRY_NUMB_NUM:
+			ret = parse_num_opt(optarg, INT32_MAX);
+			if (ret == -1) {
+				RTE_LOG(INFO, VHOST_CONFIG, "Invalid argument for rx-retry-num [0-N]\n");
+				us_vhost_usage(prgname);
+				return -1;
+			}
+			burst_rx_retry_num = ret;
+			break;
+
+		case OPT_MERGEABLE_NUM:
+			ret = parse_num_opt(optarg, 1);
+			if (ret == -1) {
+				RTE_LOG(INFO, VHOST_CONFIG, "Invalid argument for mergeable [0|1]\n");
+				us_vhost_usage(prgname);
+				return -1;
+			}
+			mergeable = !!ret;
+			break;
+
+		case OPT_STATS_NUM:
+			ret = parse_num_opt(optarg, INT32_MAX);
+			if (ret == -1) {
+				RTE_LOG(INFO, VHOST_CONFIG,
+					"Invalid argument for stats [0..N]\n");
+				us_vhost_usage(prgname);
+				return -1;
+			}
+			enable_stats = ret;
+			break;
+
+		/* Set socket file path. */
+		case OPT_SOCKET_FILE_NUM:
+			if (us_vhost_parse_socket_path(optarg) == -1) {
+				RTE_LOG(INFO, VHOST_CONFIG,
+				"Invalid argument for socket name (Max %d characters)\n",
+				PATH_MAX);
+				us_vhost_usage(prgname);
+				return -1;
+			}
+			break;
+
+		case OPT_DMAS_NUM:
+			if (open_dma(optarg) == -1) {
+				RTE_LOG(INFO, VHOST_CONFIG,
+					"Wrong DMA args\n");
+				us_vhost_usage(prgname);
+				return -1;
+			}
+			break;
+
+		case OPT_NUM_MBUFS_NUM:
+			ret = parse_num_opt(optarg, INT32_MAX);
+			if (ret == -1) {
+				RTE_LOG(INFO, VHOST_CONFIG,
+					"Invalid argument for total-num-mbufs [0..N]\n");
+				us_vhost_usage(prgname);
+				return -1;
+			}
+
+			if (total_num_mbufs < ret)
+				total_num_mbufs = ret;
+			break;
+
+		case OPT_CLIENT_NUM:
+			client_mode = 1;
+			break;
+
+		case OPT_BUILTIN_NET_DRIVER_NUM:
+			builtin_net_driver = 1;
+			break;
+
+		/* Invalid option - print options. */
 		default:
 			us_vhost_usage(prgname);
 			return -1;
@@ -757,7 +946,7 @@ link_vmdq(struct vhost_dev *vdev, struct rte_mbuf *m)
 	/* Learn MAC address of guest device from packet */
 	pkt_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
-	if (find_vhost_dev(&pkt_hdr->s_addr)) {
+	if (find_vhost_dev(&pkt_hdr->src_addr)) {
 		RTE_LOG(ERR, VHOST_DATA,
 			"(%d) device is using a registered MAC!\n",
 			vdev->vid);
@@ -765,18 +954,16 @@ link_vmdq(struct vhost_dev *vdev, struct rte_mbuf *m)
 	}
 
 	for (i = 0; i < RTE_ETHER_ADDR_LEN; i++)
-		vdev->mac_address.addr_bytes[i] = pkt_hdr->s_addr.addr_bytes[i];
+		vdev->mac_address.addr_bytes[i] =
+			pkt_hdr->src_addr.addr_bytes[i];
 
 	/* vlan_tag currently uses the device_id. */
 	vdev->vlan_tag = vlan_tags[vdev->vid];
 
 	/* Print out VMDQ registration info. */
 	RTE_LOG(INFO, VHOST_DATA,
-		"(%d) mac %02x:%02x:%02x:%02x:%02x:%02x and vlan %d registered\n",
-		vdev->vid,
-		vdev->mac_address.addr_bytes[0], vdev->mac_address.addr_bytes[1],
-		vdev->mac_address.addr_bytes[2], vdev->mac_address.addr_bytes[3],
-		vdev->mac_address.addr_bytes[4], vdev->mac_address.addr_bytes[5],
+		"(%d) mac " RTE_ETHER_ADDR_PRT_FMT " and vlan %d registered\n",
+		vdev->vid, RTE_ETHER_ADDR_BYTES(&vdev->mac_address),
 		vdev->vlan_tag);
 
 	/* Register the MAC address. */
@@ -830,36 +1017,99 @@ unlink_vmdq(struct vhost_dev *vdev)
 	}
 }
 
+static inline void
+free_pkts(struct rte_mbuf **pkts, uint16_t n)
+{
+	while (n--)
+		rte_pktmbuf_free(pkts[n]);
+}
+
 static __rte_always_inline void
-virtio_xmit(struct vhost_dev *dst_vdev, struct vhost_dev *src_vdev,
+complete_async_pkts(struct vhost_dev *vdev)
+{
+	struct rte_mbuf *p_cpl[MAX_PKT_BURST];
+	uint16_t complete_count;
+	int16_t dma_id = dma_bind[vid2socketid[vdev->vid]].dmas[VIRTIO_RXQ].dev_id;
+
+	complete_count = rte_vhost_poll_enqueue_completed(vdev->vid,
+					VIRTIO_RXQ, p_cpl, MAX_PKT_BURST, dma_id, 0);
+	if (complete_count)
+		free_pkts(p_cpl, complete_count);
+
+}
+
+static __rte_always_inline void
+sync_virtio_xmit(struct vhost_dev *dst_vdev, struct vhost_dev *src_vdev,
 	    struct rte_mbuf *m)
 {
 	uint16_t ret;
-	struct rte_mbuf *m_cpl[1];
 
 	if (builtin_net_driver) {
 		ret = vs_enqueue_pkts(dst_vdev, VIRTIO_RXQ, &m, 1);
-	} else if (async_vhost_driver) {
-		ret = rte_vhost_submit_enqueue_burst(dst_vdev->vid, VIRTIO_RXQ,
-						&m, 1);
-
-		if (likely(ret))
-			dst_vdev->nr_async_pkts++;
-
-		while (likely(dst_vdev->nr_async_pkts)) {
-			if (rte_vhost_poll_enqueue_completed(dst_vdev->vid,
-					VIRTIO_RXQ, m_cpl, 1))
-				dst_vdev->nr_async_pkts--;
-		}
 	} else {
 		ret = rte_vhost_enqueue_burst(dst_vdev->vid, VIRTIO_RXQ, &m, 1);
 	}
 
 	if (enable_stats) {
-		rte_atomic64_inc(&dst_vdev->stats.rx_total_atomic);
-		rte_atomic64_add(&dst_vdev->stats.rx_atomic, ret);
+		__atomic_add_fetch(&dst_vdev->stats.rx_total_atomic, 1,
+				__ATOMIC_SEQ_CST);
+		__atomic_add_fetch(&dst_vdev->stats.rx_atomic, ret,
+				__ATOMIC_SEQ_CST);
 		src_vdev->stats.tx_total++;
 		src_vdev->stats.tx += ret;
+	}
+}
+
+static __rte_always_inline void
+drain_vhost(struct vhost_dev *vdev)
+{
+	uint16_t ret;
+	uint32_t buff_idx = rte_lcore_id() * RTE_MAX_VHOST_DEVICE + vdev->vid;
+	uint16_t nr_xmit = vhost_txbuff[buff_idx]->len;
+	struct rte_mbuf **m = vhost_txbuff[buff_idx]->m_table;
+
+	ret = vdev_queue_ops[vdev->vid].enqueue_pkt_burst(vdev, VIRTIO_RXQ, m, nr_xmit);
+
+	if (enable_stats) {
+		__atomic_add_fetch(&vdev->stats.rx_total_atomic, nr_xmit,
+				__ATOMIC_SEQ_CST);
+		__atomic_add_fetch(&vdev->stats.rx_atomic, ret,
+				__ATOMIC_SEQ_CST);
+	}
+
+	if (!dma_bind[vid2socketid[vdev->vid]].dmas[VIRTIO_RXQ].async_enabled) {
+		free_pkts(m, nr_xmit);
+	} else {
+		uint16_t enqueue_fail = nr_xmit - ret;
+		if (enqueue_fail > 0)
+			free_pkts(&m[ret], enqueue_fail);
+	}
+}
+
+static __rte_always_inline void
+drain_vhost_table(void)
+{
+	uint16_t lcore_id = rte_lcore_id();
+	struct vhost_bufftable *vhost_txq;
+	struct vhost_dev *vdev;
+	uint64_t cur_tsc;
+
+	TAILQ_FOREACH(vdev, &vhost_dev_list, global_vdev_entry) {
+		if (unlikely(vdev->remove == 1))
+			continue;
+
+		vhost_txq = vhost_txbuff[lcore_id * RTE_MAX_VHOST_DEVICE + vdev->vid];
+
+		cur_tsc = rte_rdtsc();
+		if (unlikely(cur_tsc - vhost_txq->pre_tsc
+				> MBUF_TABLE_DRAIN_TSC)) {
+			RTE_LOG_DP(DEBUG, VHOST_DATA,
+				"Vhost TX queue drained after timeout with burst size %u\n",
+				vhost_txq->len);
+			drain_vhost(vdev);
+			vhost_txq->len = 0;
+			vhost_txq->pre_tsc = cur_tsc;
+		}
 	}
 }
 
@@ -872,10 +1122,11 @@ virtio_tx_local(struct vhost_dev *vdev, struct rte_mbuf *m)
 {
 	struct rte_ether_hdr *pkt_hdr;
 	struct vhost_dev *dst_vdev;
-
+	struct vhost_bufftable *vhost_txq;
+	uint16_t lcore_id = rte_lcore_id();
 	pkt_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
-	dst_vdev = find_vhost_dev(&pkt_hdr->d_addr);
+	dst_vdev = find_vhost_dev(&pkt_hdr->dst_addr);
 	if (!dst_vdev)
 		return -1;
 
@@ -895,7 +1146,19 @@ virtio_tx_local(struct vhost_dev *vdev, struct rte_mbuf *m)
 		return 0;
 	}
 
-	virtio_xmit(dst_vdev, vdev, m);
+	vhost_txq = vhost_txbuff[lcore_id * RTE_MAX_VHOST_DEVICE + dst_vdev->vid];
+	vhost_txq->m_table[vhost_txq->len++] = m;
+
+	if (enable_stats) {
+		vdev->stats.tx_total++;
+		vdev->stats.tx++;
+	}
+
+	if (unlikely(vhost_txq->len == MAX_PKT_BURST)) {
+		drain_vhost(dst_vdev);
+		vhost_txq->len = 0;
+		vhost_txq->pre_tsc = rte_rdtsc();
+	}
 	return 0;
 }
 
@@ -911,7 +1174,7 @@ find_local_dest(struct vhost_dev *vdev, struct rte_mbuf *m,
 	struct rte_ether_hdr *pkt_hdr =
 		rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
-	dst_vdev = find_vhost_dev(&pkt_hdr->d_addr);
+	dst_vdev = find_vhost_dev(&pkt_hdr->dst_addr);
 	if (!dst_vdev)
 		return 0;
 
@@ -927,7 +1190,7 @@ find_local_dest(struct vhost_dev *vdev, struct rte_mbuf *m,
 	 * by minus length of vlan tag, so need restore
 	 * the packet length by plus it.
 	 */
-	*offset  = VLAN_HLEN;
+	*offset  = RTE_VLAN_HLEN;
 	*vlan_tag = vlan_tags[vdev->vid];
 
 	RTE_LOG_DP(DEBUG, VHOST_DATA,
@@ -954,24 +1217,17 @@ static void virtio_tx_offload(struct rte_mbuf *m)
 	tcp_hdr = rte_pktmbuf_mtod_offset(m, struct rte_tcp_hdr *,
 		m->l2_len + m->l3_len);
 
-	m->ol_flags |= PKT_TX_TCP_SEG;
+	m->ol_flags |= RTE_MBUF_F_TX_TCP_SEG;
 	if ((ptype & RTE_PTYPE_L3_MASK) == RTE_PTYPE_L3_IPV4) {
-		m->ol_flags |= PKT_TX_IPV4;
-		m->ol_flags |= PKT_TX_IP_CKSUM;
+		m->ol_flags |= RTE_MBUF_F_TX_IPV4;
+		m->ol_flags |= RTE_MBUF_F_TX_IP_CKSUM;
 		ipv4_hdr = l3_hdr;
 		ipv4_hdr->hdr_checksum = 0;
 		tcp_hdr->cksum = rte_ipv4_phdr_cksum(l3_hdr, m->ol_flags);
 	} else { /* assume ethertype == RTE_ETHER_TYPE_IPV6 */
-		m->ol_flags |= PKT_TX_IPV6;
+		m->ol_flags |= RTE_MBUF_F_TX_IPV6;
 		tcp_hdr->cksum = rte_ipv6_phdr_cksum(l3_hdr, m->ol_flags);
 	}
-}
-
-static inline void
-free_pkts(struct rte_mbuf **pkts, uint16_t n)
-{
-	while (n--)
-		rte_pktmbuf_free(pkts[n]);
 }
 
 static __rte_always_inline void
@@ -1001,21 +1257,19 @@ virtio_tx_route(struct vhost_dev *vdev, struct rte_mbuf *m, uint16_t vlan_tag)
 
 
 	nh = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
-	if (unlikely(rte_is_broadcast_ether_addr(&nh->d_addr))) {
+	if (unlikely(rte_is_broadcast_ether_addr(&nh->dst_addr))) {
 		struct vhost_dev *vdev2;
 
 		TAILQ_FOREACH(vdev2, &vhost_dev_list, global_vdev_entry) {
 			if (vdev2 != vdev)
-				virtio_xmit(vdev2, vdev, m);
+				sync_virtio_xmit(vdev2, vdev, m);
 		}
 		goto queue2nic;
 	}
 
 	/*check if destination is local VM*/
-	if ((vm2vm_mode == VM2VM_SOFTWARE) && (virtio_tx_local(vdev, m) == 0)) {
-		rte_pktmbuf_free(m);
+	if ((vm2vm_mode == VM2VM_SOFTWARE) && (virtio_tx_local(vdev, m) == 0))
 		return;
-	}
 
 	if (unlikely(vm2vm_mode == VM2VM_HARDWARE)) {
 		if (unlikely(find_local_dest(vdev, m, &offset,
@@ -1042,7 +1296,7 @@ queue2nic:
 			(vh->vlan_tci != vlan_tag_be))
 			vh->vlan_tci = vlan_tag_be;
 	} else {
-		m->ol_flags |= PKT_TX_VLAN_PKT;
+		m->ol_flags |= RTE_MBUF_F_TX_VLAN;
 
 		/*
 		 * Find the right seg to adjust the data len when offset is
@@ -1066,7 +1320,7 @@ queue2nic:
 		m->vlan_tci = vlan_tag;
 	}
 
-	if (m->ol_flags & PKT_RX_LRO)
+	if (m->ol_flags & RTE_MBUF_F_RX_LRO)
 		virtio_tx_offload(m);
 
 	tx_q->m_table[tx_q->len++] = m;
@@ -1100,17 +1354,25 @@ drain_mbuf_table(struct mbuf_table *tx_q)
 	}
 }
 
-static __rte_always_inline void
-complete_async_pkts(struct vhost_dev *vdev, uint16_t qid)
+uint16_t
+async_enqueue_pkts(struct vhost_dev *dev, uint16_t queue_id,
+		struct rte_mbuf **pkts, uint32_t rx_count)
 {
-	struct rte_mbuf *p_cpl[MAX_PKT_BURST];
-	uint16_t complete_count;
+	uint16_t enqueue_count;
+	uint16_t dma_id = dma_bind[vid2socketid[dev->vid]].dmas[VIRTIO_RXQ].dev_id;
 
-	complete_count = rte_vhost_poll_enqueue_completed(vdev->vid,
-						qid, p_cpl, MAX_PKT_BURST);
-	vdev->nr_async_pkts -= complete_count;
-	if (complete_count)
-		free_pkts(p_cpl, complete_count);
+	complete_async_pkts(dev);
+	enqueue_count = rte_vhost_submit_enqueue_burst(dev->vid, queue_id,
+					pkts, rx_count, dma_id, 0);
+
+	return enqueue_count;
+}
+
+uint16_t
+sync_enqueue_pkts(struct vhost_dev *dev, uint16_t queue_id,
+		struct rte_mbuf **pkts, uint32_t rx_count)
+{
+	return rte_vhost_enqueue_burst(dev->vid, queue_id, pkts, rx_count);
 }
 
 static __rte_always_inline void
@@ -1122,49 +1384,59 @@ drain_eth_rx(struct vhost_dev *vdev)
 	rx_count = rte_eth_rx_burst(ports[0], vdev->vmdq_rx_q,
 				    pkts, MAX_PKT_BURST);
 
-	while (likely(vdev->nr_async_pkts))
-		complete_async_pkts(vdev, VIRTIO_RXQ);
-
 	if (!rx_count)
 		return;
 
-	/*
-	 * When "enable_retry" is set, here we wait and retry when there
-	 * is no enough free slots in the queue to hold @rx_count packets,
-	 * to diminish packet loss.
-	 */
-	if (enable_retry &&
-	    unlikely(rx_count > rte_vhost_avail_entries(vdev->vid,
-			VIRTIO_RXQ))) {
-		uint32_t retry;
+	enqueue_count = vdev_queue_ops[vdev->vid].enqueue_pkt_burst(vdev,
+						VIRTIO_RXQ, pkts, rx_count);
 
-		for (retry = 0; retry < burst_rx_retry_num; retry++) {
+	/* Retry if necessary */
+	if (enable_retry && unlikely(enqueue_count < rx_count)) {
+		uint32_t retry = 0;
+
+		while (enqueue_count < rx_count && retry++ < burst_rx_retry_num) {
 			rte_delay_us(burst_rx_delay_time);
-			if (rx_count <= rte_vhost_avail_entries(vdev->vid,
-					VIRTIO_RXQ))
-				break;
+			enqueue_count += vdev_queue_ops[vdev->vid].enqueue_pkt_burst(vdev,
+							VIRTIO_RXQ, &pkts[enqueue_count],
+							rx_count - enqueue_count);
 		}
 	}
 
-	if (builtin_net_driver) {
-		enqueue_count = vs_enqueue_pkts(vdev, VIRTIO_RXQ,
-						pkts, rx_count);
-	} else if (async_vhost_driver) {
-		enqueue_count = rte_vhost_submit_enqueue_burst(vdev->vid,
-					VIRTIO_RXQ, pkts, rx_count);
-		vdev->nr_async_pkts += enqueue_count;
-	} else {
-		enqueue_count = rte_vhost_enqueue_burst(vdev->vid, VIRTIO_RXQ,
-						pkts, rx_count);
-	}
-
 	if (enable_stats) {
-		rte_atomic64_add(&vdev->stats.rx_total_atomic, rx_count);
-		rte_atomic64_add(&vdev->stats.rx_atomic, enqueue_count);
+		__atomic_add_fetch(&vdev->stats.rx_total_atomic, rx_count,
+				__ATOMIC_SEQ_CST);
+		__atomic_add_fetch(&vdev->stats.rx_atomic, enqueue_count,
+				__ATOMIC_SEQ_CST);
 	}
 
-	if (!async_vhost_driver)
+	if (!dma_bind[vid2socketid[vdev->vid]].dmas[VIRTIO_RXQ].async_enabled) {
 		free_pkts(pkts, rx_count);
+	} else {
+		uint16_t enqueue_fail = rx_count - enqueue_count;
+		if (enqueue_fail > 0)
+			free_pkts(&pkts[enqueue_count], enqueue_fail);
+	}
+}
+
+uint16_t async_dequeue_pkts(struct vhost_dev *dev, uint16_t queue_id,
+			    struct rte_mempool *mbuf_pool,
+			    struct rte_mbuf **pkts, uint16_t count)
+{
+	int nr_inflight;
+	uint16_t dequeue_count;
+	int16_t dma_id = dma_bind[vid2socketid[dev->vid]].dmas[VIRTIO_TXQ].dev_id;
+
+	dequeue_count = rte_vhost_async_try_dequeue_burst(dev->vid, queue_id,
+			mbuf_pool, pkts, count, &nr_inflight, dma_id, 0);
+
+	return dequeue_count;
+}
+
+uint16_t sync_dequeue_pkts(struct vhost_dev *dev, uint16_t queue_id,
+			   struct rte_mempool *mbuf_pool,
+			   struct rte_mbuf **pkts, uint16_t count)
+{
+	return rte_vhost_dequeue_burst(dev->vid, queue_id, mbuf_pool, pkts, count);
 }
 
 static __rte_always_inline void
@@ -1174,13 +1446,8 @@ drain_virtio_tx(struct vhost_dev *vdev)
 	uint16_t count;
 	uint16_t i;
 
-	if (builtin_net_driver) {
-		count = vs_dequeue_pkts(vdev, VIRTIO_TXQ, mbuf_pool,
-					pkts, MAX_PKT_BURST);
-	} else {
-		count = rte_vhost_dequeue_burst(vdev->vid, VIRTIO_TXQ,
-					mbuf_pool, pkts, MAX_PKT_BURST);
-	}
+	count = vdev_queue_ops[vdev->vid].dequeue_pkt_burst(vdev,
+				VIRTIO_TXQ, mbuf_pool, pkts, MAX_PKT_BURST);
 
 	/* setup VMDq for the first packet */
 	if (unlikely(vdev->ready == DEVICE_MAC_LEARNING) && count) {
@@ -1229,7 +1496,7 @@ switch_worker(void *arg __rte_unused)
 
 	while(1) {
 		drain_mbuf_table(tx_q);
-
+		drain_vhost_table();
 		/*
 		 * Inform the configuration core that we have exited the
 		 * linked list and that no devices are in use if requested.
@@ -1259,6 +1526,45 @@ switch_worker(void *arg __rte_unused)
 	return 0;
 }
 
+static void
+vhost_clear_queue_thread_unsafe(struct vhost_dev *vdev, uint16_t queue_id)
+{
+	uint16_t n_pkt = 0;
+	int pkts_inflight;
+
+	int16_t dma_id = dma_bind[vid2socketid[vdev->vid]].dmas[queue_id].dev_id;
+	pkts_inflight = rte_vhost_async_get_inflight_thread_unsafe(vdev->vid, queue_id);
+
+	struct rte_mbuf *m_cpl[pkts_inflight];
+
+	while (pkts_inflight) {
+		n_pkt = rte_vhost_clear_queue_thread_unsafe(vdev->vid, queue_id, m_cpl,
+							pkts_inflight, dma_id, 0);
+		free_pkts(m_cpl, n_pkt);
+		pkts_inflight = rte_vhost_async_get_inflight_thread_unsafe(vdev->vid,
+									queue_id);
+	}
+}
+
+static void
+vhost_clear_queue(struct vhost_dev *vdev, uint16_t queue_id)
+{
+	uint16_t n_pkt = 0;
+	int pkts_inflight;
+
+	int16_t dma_id = dma_bind[vid2socketid[vdev->vid]].dmas[queue_id].dev_id;
+	pkts_inflight = rte_vhost_async_get_inflight(vdev->vid, queue_id);
+
+	struct rte_mbuf *m_cpl[pkts_inflight];
+
+	while (pkts_inflight) {
+		n_pkt = rte_vhost_clear_queue(vdev->vid, queue_id, m_cpl,
+						pkts_inflight, dma_id, 0);
+		free_pkts(m_cpl, n_pkt);
+		pkts_inflight = rte_vhost_async_get_inflight(vdev->vid, queue_id);
+	}
+}
+
 /*
  * Remove a device from the specific data core linked list and from the
  * main linked list. Synchronization  occurs through the use of the
@@ -1270,6 +1576,7 @@ destroy_device(int vid)
 {
 	struct vhost_dev *vdev = NULL;
 	int lcore;
+	uint16_t i;
 
 	TAILQ_FOREACH(vdev, &vhost_dev_list, global_vdev_entry) {
 		if (vdev->vid == vid)
@@ -1282,6 +1589,9 @@ destroy_device(int vid)
 	while(vdev->ready != DEVICE_SAFE_REMOVE) {
 		rte_pause();
 	}
+
+	for (i = 0; i < RTE_MAX_LCORE; i++)
+		rte_free(vhost_txbuff[i * RTE_MAX_VHOST_DEVICE + vid]);
 
 	if (builtin_net_driver)
 		vs_vhost_net_remove(vdev);
@@ -1311,11 +1621,79 @@ destroy_device(int vid)
 		"(%d) device has been removed from data core\n",
 		vdev->vid);
 
-	if (async_vhost_driver)
+	if (dma_bind[vid].dmas[VIRTIO_RXQ].async_enabled) {
+		vhost_clear_queue(vdev, VIRTIO_RXQ);
 		rte_vhost_async_channel_unregister(vid, VIRTIO_RXQ);
+		dma_bind[vid].dmas[VIRTIO_RXQ].async_enabled = false;
+	}
+
+	if (dma_bind[vid].dmas[VIRTIO_TXQ].async_enabled) {
+		vhost_clear_queue(vdev, VIRTIO_TXQ);
+		rte_vhost_async_channel_unregister(vid, VIRTIO_TXQ);
+		dma_bind[vid].dmas[VIRTIO_TXQ].async_enabled = false;
+	}
 
 	rte_free(vdev);
 }
+
+static inline int
+get_socketid_by_vid(int vid)
+{
+	int i;
+	char ifname[PATH_MAX];
+	rte_vhost_get_ifname(vid, ifname, sizeof(ifname));
+
+	for (i = 0; i < nb_sockets; i++) {
+		char *file = socket_files + i * PATH_MAX;
+		if (strcmp(file, ifname) == 0)
+			return i;
+	}
+
+	return -1;
+}
+
+static int
+init_vhost_queue_ops(int vid)
+{
+	if (builtin_net_driver) {
+		vdev_queue_ops[vid].enqueue_pkt_burst = builtin_enqueue_pkts;
+		vdev_queue_ops[vid].dequeue_pkt_burst = builtin_dequeue_pkts;
+	} else {
+		if (dma_bind[vid2socketid[vid]].dmas[VIRTIO_RXQ].async_enabled)
+			vdev_queue_ops[vid].enqueue_pkt_burst = async_enqueue_pkts;
+		else
+			vdev_queue_ops[vid].enqueue_pkt_burst = sync_enqueue_pkts;
+
+		if (dma_bind[vid2socketid[vid]].dmas[VIRTIO_TXQ].async_enabled)
+			vdev_queue_ops[vid].dequeue_pkt_burst = async_dequeue_pkts;
+		else
+			vdev_queue_ops[vid].dequeue_pkt_burst = sync_dequeue_pkts;
+	}
+
+	return 0;
+}
+
+static inline int
+vhost_async_channel_register(int vid)
+{
+	int rx_ret = 0, tx_ret = 0;
+
+	if (dma_bind[vid2socketid[vid]].dmas[VIRTIO_RXQ].dev_id != INVALID_DMA_ID) {
+		rx_ret = rte_vhost_async_channel_register(vid, VIRTIO_RXQ);
+		if (rx_ret == 0)
+			dma_bind[vid2socketid[vid]].dmas[VIRTIO_RXQ].async_enabled = true;
+	}
+
+	if (dma_bind[vid2socketid[vid]].dmas[VIRTIO_TXQ].dev_id != INVALID_DMA_ID) {
+		tx_ret = rte_vhost_async_channel_register(vid, VIRTIO_TXQ);
+		if (tx_ret == 0)
+			dma_bind[vid2socketid[vid]].dmas[VIRTIO_TXQ].async_enabled = true;
+	}
+
+	return rx_ret | tx_ret;
+}
+
+
 
 /*
  * A new device is added to a data core. First the device is added to the main linked list
@@ -1325,8 +1703,11 @@ static int
 new_device(int vid)
 {
 	int lcore, core_add = 0;
+	uint16_t i;
 	uint32_t device_num_min = num_devices;
 	struct vhost_dev *vdev;
+	int ret;
+
 	vdev = rte_zmalloc("vhost device", sizeof(*vdev), RTE_CACHE_LINE_SIZE);
 	if (vdev == NULL) {
 		RTE_LOG(INFO, VHOST_DATA,
@@ -1335,6 +1716,30 @@ new_device(int vid)
 		return -1;
 	}
 	vdev->vid = vid;
+
+	for (i = 0; i < RTE_MAX_LCORE; i++) {
+		vhost_txbuff[i * RTE_MAX_VHOST_DEVICE + vid]
+			= rte_zmalloc("vhost bufftable",
+				sizeof(struct vhost_bufftable),
+				RTE_CACHE_LINE_SIZE);
+
+		if (vhost_txbuff[i * RTE_MAX_VHOST_DEVICE + vid] == NULL) {
+			RTE_LOG(INFO, VHOST_DATA,
+			  "(%d) couldn't allocate memory for vhost TX\n", vid);
+			return -1;
+		}
+	}
+
+	int socketid = get_socketid_by_vid(vid);
+	if (socketid == -1)
+		return -1;
+
+	init_vid2socketid_array(vid, socketid);
+
+	ret =  vhost_async_channel_register(vid);
+
+	if (init_vhost_queue_ops(vid) != 0)
+		return -1;
 
 	if (builtin_net_driver)
 		vs_vhost_net_setup(vdev);
@@ -1367,18 +1772,24 @@ new_device(int vid)
 		"(%d) device has been added to data core %d\n",
 		vid, vdev->coreid);
 
-	if (async_vhost_driver) {
-		struct rte_vhost_async_features f;
-		struct rte_vhost_async_channel_ops channel_ops;
-		if (strncmp(dma_type, "ioat", 4) == 0) {
-			channel_ops.transfer_data = ioat_transfer_data_cb;
-			channel_ops.check_completed_copies =
-				ioat_check_completed_copies_cb;
-			f.async_inorder = 1;
-			f.async_threshold = 256;
-			return rte_vhost_async_channel_register(vid, VIRTIO_RXQ,
-				f.intval, &channel_ops);
-		}
+	return ret;
+}
+
+static int
+vring_state_changed(int vid, uint16_t queue_id, int enable)
+{
+	struct vhost_dev *vdev = NULL;
+
+	TAILQ_FOREACH(vdev, &vhost_dev_list, global_vdev_entry) {
+		if (vdev->vid == vid)
+			break;
+	}
+	if (!vdev)
+		return -1;
+
+	if (dma_bind[vid2socketid[vid]].dmas[queue_id].async_enabled) {
+		if (!enable)
+			vhost_clear_queue_thread_unsafe(vdev, queue_id);
 	}
 
 	return 0;
@@ -1388,10 +1799,11 @@ new_device(int vid)
  * These callback allow devices to be added to the data core when configuration
  * has been fully complete.
  */
-static const struct vhost_device_ops virtio_net_device_ops =
+static const struct rte_vhost_device_ops virtio_net_device_ops =
 {
 	.new_device =  new_device,
 	.destroy_device = destroy_device,
+	.vring_state_changed = vring_state_changed,
 };
 
 /*
@@ -1419,8 +1831,10 @@ print_stats(__rte_unused void *arg)
 			tx         = vdev->stats.tx;
 			tx_dropped = tx_total - tx;
 
-			rx_total   = rte_atomic64_read(&vdev->stats.rx_total_atomic);
-			rx         = rte_atomic64_read(&vdev->stats.rx_atomic);
+			rx_total = __atomic_load_n(&vdev->stats.rx_total_atomic,
+				__ATOMIC_SEQ_CST);
+			rx         = __atomic_load_n(&vdev->stats.rx_atomic,
+				__ATOMIC_SEQ_CST);
 			rx_dropped = rx_total - rx;
 
 			printf("Statistics for device %d\n"
@@ -1468,6 +1882,24 @@ sigint_handler(__rte_unused int signum)
 	exit(0);
 }
 
+static void
+reset_dma(void)
+{
+	int i;
+
+	for (i = 0; i < RTE_MAX_VHOST_DEVICE; i++) {
+		int j;
+
+		for (j = 0; j < RTE_MAX_QUEUES_PER_PORT * 2; j++) {
+			dma_bind[i].dmas[j].dev_id = INVALID_DMA_ID;
+			dma_bind[i].dmas[j].async_enabled = false;
+		}
+	}
+
+	for (i = 0; i < RTE_DMADEV_DEFAULT_MAX; i++)
+		dmas_id[i] = INVALID_DMA_ID;
+}
+
 /*
  * Main function, does initialisation and calls the per-lcore functions.
  */
@@ -1489,6 +1921,9 @@ main(int argc, char *argv[])
 		rte_exit(EXIT_FAILURE, "Error with EAL initialization\n");
 	argc -= ret;
 	argv += ret;
+
+	/* initialize dma structures */
+	reset_dma();
 
 	/* parse app arguments */
 	ret = us_vhost_parse_args(argc, argv);
@@ -1568,10 +2003,18 @@ main(int argc, char *argv[])
 	if (client_mode)
 		flags |= RTE_VHOST_USER_CLIENT;
 
+	for (i = 0; i < dma_count; i++) {
+		if (rte_vhost_async_dma_configure(dmas_id[i], 0) < 0) {
+			RTE_LOG(ERR, VHOST_PORT, "Failed to configure DMA in vhost.\n");
+			rte_exit(EXIT_FAILURE, "Cannot use given DMA device\n");
+		}
+	}
+
 	/* Register vhost user driver to handle vhost messages. */
 	for (i = 0; i < nb_sockets; i++) {
 		char *file = socket_files + i * PATH_MAX;
-		if (async_vhost_driver)
+
+		if (dma_count && get_async_flag_by_socketid(i) != 0)
 			flags = flags | RTE_VHOST_USER_ASYNC_COPY;
 
 		ret = rte_vhost_driver_register(file, flags);
@@ -1625,6 +2068,14 @@ main(int argc, char *argv[])
 
 	RTE_LCORE_FOREACH_WORKER(lcore_id)
 		rte_eal_wait_lcore(lcore_id);
+
+	for (i = 0; i < dma_count; i++) {
+		if (rte_vhost_async_dma_unconfigure(dmas_id[i], 0) < 0) {
+			RTE_LOG(ERR, VHOST_PORT,
+				"Failed to unconfigure DMA %d in vhost.\n", dmas_id[i]);
+			rte_exit(EXIT_FAILURE, "Cannot use given DMA device\n");
+		}
+	}
 
 	/* clean up the EAL */
 	rte_eal_cleanup();

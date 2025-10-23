@@ -6,9 +6,9 @@
 
 #include <rte_mbuf.h>
 #include <rte_malloc.h>
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_tcp.h>
-#include <rte_bus_vdev.h>
+#include <bus_vdev_driver.h>
 #include <rte_kvargs.h>
 
 #include "rte_eth_bond.h"
@@ -151,8 +151,8 @@ int
 rte_eth_bond_create(const char *name, uint8_t mode, uint8_t socket_id)
 {
 	struct bond_dev_private *internals;
+	struct rte_eth_dev *bond_dev;
 	char devargs[52];
-	uint16_t port_id;
 	int ret;
 
 	if (name == NULL) {
@@ -169,8 +169,8 @@ rte_eth_bond_create(const char *name, uint8_t mode, uint8_t socket_id)
 	if (ret)
 		return ret;
 
-	ret = rte_eth_dev_get_port_by_name(name, &port_id);
-	RTE_ASSERT(!ret);
+	bond_dev = rte_eth_dev_get_by_name(name);
+	RTE_ASSERT(bond_dev);
 
 	/*
 	 * To make bond_ethdev_configure() happy we need to free the
@@ -178,11 +178,11 @@ rte_eth_bond_create(const char *name, uint8_t mode, uint8_t socket_id)
 	 *
 	 * Also see comment in bond_ethdev_configure().
 	 */
-	internals = rte_eth_devices[port_id].data->dev_private;
+	internals = bond_dev->data->dev_private;
 	rte_kvargs_free(internals->kvlist);
 	internals->kvlist = NULL;
 
-	return port_id;
+	return bond_dev->data->port_id;
 }
 
 int
@@ -204,7 +204,7 @@ slave_vlan_filter_set(uint16_t bonded_port_id, uint16_t slave_port_id)
 
 	bonded_eth_dev = &rte_eth_devices[bonded_port_id];
 	if ((bonded_eth_dev->data->dev_conf.rxmode.offloads &
-			DEV_RX_OFFLOAD_VLAN_FILTER) == 0)
+			RTE_ETH_RX_OFFLOAD_VLAN_FILTER) == 0)
 		return 0;
 
 	internals = bonded_eth_dev->data->dev_private;
@@ -513,6 +513,8 @@ __eth_bond_slave_add_lock_free(uint16_t bonded_port_id, uint16_t slave_port_id)
 		internals->primary_port = slave_port_id;
 		internals->current_primary_port = slave_port_id;
 
+		internals->speed_capa = dev_info.speed_capa;
+
 		/* Inherit queues settings from first slave */
 		internals->nb_rx_queues = slave_eth_dev->data->nb_rx_queues;
 		internals->nb_tx_queues = slave_eth_dev->data->nb_tx_queues;
@@ -527,6 +529,7 @@ __eth_bond_slave_add_lock_free(uint16_t bonded_port_id, uint16_t slave_port_id)
 	} else {
 		int ret;
 
+		internals->speed_capa &= dev_info.speed_capa;
 		eth_bond_slave_inherit_dev_info_rx_next(internals, &dev_info);
 		eth_bond_slave_inherit_dev_info_tx_next(internals, &dev_info);
 
@@ -540,6 +543,11 @@ __eth_bond_slave_add_lock_free(uint16_t bonded_port_id, uint16_t slave_port_id)
 		if (ret != 0)
 			return ret;
 	}
+
+	/* Bond mode Broadcast & 8023AD don't support MBUF_FAST_FREE offload. */
+	if (internals->mode == BONDING_MODE_8023AD ||
+	    internals->mode == BONDING_MODE_BROADCAST)
+		internals->tx_offload_capa &= ~RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
 
 	bonded_eth_dev->data->dev_conf.rx_adv_conf.rss_conf.rss_hf &=
 			internals->flow_type_rss_offloads;
@@ -563,6 +571,12 @@ __eth_bond_slave_add_lock_free(uint16_t bonded_port_id, uint16_t slave_port_id)
 		if (slave_configure(bonded_eth_dev, slave_eth_dev) != 0) {
 			internals->slave_count--;
 			RTE_BOND_LOG(ERR, "rte_bond_slaves_configure: port=%d",
+					slave_port_id);
+			return -1;
+		}
+		if (slave_start(bonded_eth_dev, slave_eth_dev) != 0) {
+			internals->slave_count--;
+			RTE_BOND_LOG(ERR, "rte_bond_slaves_start: port=%d",
 					slave_port_id);
 			return -1;
 		}
@@ -592,7 +606,7 @@ __eth_bond_slave_add_lock_free(uint16_t bonded_port_id, uint16_t slave_port_id)
 			return -1;
 		}
 
-		 if (link_props.link_status == ETH_LINK_UP) {
+		if (link_props.link_status == RTE_ETH_LINK_UP) {
 			if (internals->active_slave_count == 0 &&
 			    !internals->user_defined_primary_port)
 				bond_ethdev_primary_set(internals,
@@ -698,6 +712,16 @@ __eth_bond_slave_remove_lock_free(uint16_t bonded_port_id,
 		}
 	}
 
+	/* Remove the dedicated queues flow */
+	if (internals->mode == BONDING_MODE_8023AD &&
+		internals->mode4.dedicated_queues.enabled == 1 &&
+		internals->mode4.dedicated_queues.flow[slave_port_id] != NULL) {
+		rte_flow_destroy(slave_port_id,
+				internals->mode4.dedicated_queues.flow[slave_port_id],
+				&flow_error);
+		internals->mode4.dedicated_queues.flow[slave_port_id] = NULL;
+	}
+
 	slave_eth_dev = &rte_eth_devices[slave_port_id];
 	slave_remove(internals, slave_eth_dev);
 	slave_eth_dev->data->dev_flags &= (~RTE_ETH_DEV_BONDED_SLAVE);
@@ -727,7 +751,7 @@ __eth_bond_slave_remove_lock_free(uint16_t bonded_port_id,
 		internals->tx_offload_capa = 0;
 		internals->rx_queue_offload_capa = 0;
 		internals->tx_queue_offload_capa = 0;
-		internals->flow_type_rss_offloads = ETH_RSS_PROTO_MASK;
+		internals->flow_type_rss_offloads = RTE_ETH_RSS_PROTO_MASK;
 		internals->reta_size = 0;
 		internals->candidate_max_rx_pktlen = 0;
 		internals->max_rx_pktlen = 0;

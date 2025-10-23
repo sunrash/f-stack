@@ -9,8 +9,8 @@ Overview
 --------
 
 This API provides a generic means to configure hardware to match specific
-ingress or egress traffic, alter its fate and query related counters
-according to any number of user-defined rules.
+traffic, alter its fate and query related counters according to any
+number of user-defined rules.
 
 It is named *rte_flow* after the prefix used for all its symbols, and is
 defined in ``rte_flow.h``.
@@ -21,11 +21,6 @@ defined in ``rte_flow.h``.
 - Possible operations include dropping traffic, diverting it to specific
   queues, to virtual/physical device functions or ports, performing tunnel
   offloads, adding marks and so on.
-
-It is slightly higher-level than the legacy filtering framework which it
-encompasses and supersedes (including all functions and filter types) in
-order to expose a single interface with an unambiguous behavior that is
-common to all poll-mode drivers (PMDs).
 
 Flow rule
 ---------
@@ -92,6 +87,42 @@ To avoid resource leaks on the PMD side, handles must be explicitly
 destroyed by the application before releasing associated resources such as
 queues and ports.
 
+.. warning::
+
+   The following description of rule persistence is an experimental behavior
+   that may change without a prior notice.
+
+When the device is stopped, its rules do not process the traffic.
+In particular, transfer rules created using some device
+stop affecting the traffic even if they refer to different ports.
+
+If ``RTE_ETH_DEV_CAPA_FLOW_RULE_KEEP`` is not advertised,
+rules cannot be created until the device is started for the first time
+and cannot be kept when the device is stopped.
+However, PMD also does not flush them automatically on stop,
+so the application must call ``rte_flow_flush()`` or ``rte_flow_destroy()``
+before stopping the device to ensure no rules remain.
+
+If ``RTE_ETH_DEV_CAPA_FLOW_RULE_KEEP`` is advertised, this means
+the PMD can keep at least some rules across the device stop and start.
+However, ``rte_eth_dev_configure()`` may fail if any rules remain,
+so the application must flush them before attempting a reconfiguration.
+Keeping may be unsupported for some types of rule items and actions,
+as well as depending on the value of flow attributes transfer bit.
+A combination of a single an item or action type
+and a value of the transfer bit is called a rule feature.
+For example: a COUNT action with the transfer bit set.
+To test if rules with a particular feature are kept, the application must try
+to create a valid rule using this feature when the device is not started
+(either before the first start or after a stop).
+If it fails with an error of type ``RTE_FLOW_ERROR_TYPE_STATE``,
+all rules using this feature must be flushed by the application
+before stopping the device.
+If it succeeds, such rules will be kept when the device is stopped,
+provided they do not use other features that are not supported.
+Rules that are created when the device is stopped, including the rules
+created for the test, will be kept after the device is started.
+
 The following sections cover:
 
 - **Attributes** (represented by ``struct rte_flow_attr``): properties of a
@@ -117,14 +148,15 @@ Attribute: Group
 Flow rules can be grouped by assigning them a common group number. Groups
 allow a logical hierarchy of flow rule groups (tables) to be defined. These
 groups can be supported virtually in the PMD or in the physical device.
-Group 0 is the default group and this is the only group which flows are
-guarantee to matched against, all subsequent groups can only be reached by
-way of the JUMP action from a matched flow rule.
+Group 0 is the default group and is the only group that
+flows are guaranteed to be matched against.
+All subsequent groups can only be reached by using a JUMP action
+from a matched flow rule.
 
 Although optional, applications are encouraged to group similar rules as
 much as possible to fully take advantage of hardware capabilities
 (e.g. optimized matching) and work around limitations (e.g. a single pattern
-type possibly allowed in a given group), while being aware that the groups
+type possibly allowed in a given group), while being aware that the groups'
 hierarchies must be programmed explicitly.
 
 Note that support for more than a single group is not guaranteed.
@@ -139,7 +171,7 @@ Priority levels are arbitrary and up to the application, they do
 not need to be contiguous nor start from 0, however the maximum number
 varies between devices and may be affected by existing flow rules.
 
-A flow which matches multiple rules in the same group will always matched by
+A flow which matches multiple rules in the same group will always be matched by
 the rule with the highest priority in that group.
 
 If a packet is matched by several rules of a given group for a given
@@ -151,19 +183,16 @@ Note that support for more than a single priority level is not guaranteed.
 Attribute: Traffic direction
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Flow rule patterns apply to inbound and/or outbound traffic.
-
-In the context of this API, **ingress** and **egress** respectively stand
-for **inbound** and **outbound** based on the standpoint of the application
-creating a flow rule.
-
-There are no exceptions to this definition.
+Unless `Attribute: Transfer`_ is specified, flow rule patterns apply
+to inbound and / or outbound traffic. With this respect, ``ingress``
+and ``egress`` respectively stand for **inbound** and **outbound**
+based on the standpoint of the application creating a flow rule.
 
 Several pattern items and actions are valid and can be used in both
 directions. At least one direction must be specified.
 
 Specifying both directions at once for a given rule is not recommended but
-may be valid in a few cases (e.g. shared counters).
+may be valid in a few cases.
 
 Attribute: Transfer
 ^^^^^^^^^^^^^^^^^^^
@@ -176,12 +205,8 @@ When supported, this effectively enables an application to reroute traffic
 not necessarily intended for it (e.g. coming from or addressed to different
 physical ports, VFs or applications) at the device level.
 
-It complements the behavior of some pattern items such as `Item: PHY_PORT`_
-and is meaningless without them.
-
-When transferring flow rules, **ingress** and **egress** attributes
-(`Attribute: Traffic direction`_) keep their original meaning, as if
-processing traffic emitted or received by the application.
+In "transfer" flows, the use of `Attribute: Traffic direction`_ in not allowed.
+One may use `Item: PORT_REPRESENTOR`_ and `Item: REPRESENTED_PORT`_ instead.
 
 Pattern item
 ~~~~~~~~~~~~
@@ -506,111 +531,18 @@ Usage example, matching non-TCPv4 packets only:
    | 4     | END      |
    +-------+----------+
 
-Item: ``PF``
-^^^^^^^^^^^^
-
-Matches traffic originating from (ingress) or going to (egress) the physical
-function of the current device.
-
-If supported, should work even if the physical function is not managed by
-the application and thus not associated with a DPDK port ID.
-
-- Can be combined with any number of `Item: VF`_ to match both PF and VF
-  traffic.
-- ``spec``, ``last`` and ``mask`` must not be set.
-
-.. _table_rte_flow_item_pf:
-
-.. table:: PF
-
-   +----------+-------+
-   | Field    | Value |
-   +==========+=======+
-   | ``spec`` | unset |
-   +----------+-------+
-   | ``last`` | unset |
-   +----------+-------+
-   | ``mask`` | unset |
-   +----------+-------+
-
-Item: ``VF``
-^^^^^^^^^^^^
-
-Matches traffic originating from (ingress) or going to (egress) a given
-virtual function of the current device.
-
-If supported, should work even if the virtual function is not managed by the
-application and thus not associated with a DPDK port ID.
-
-Note this pattern item does not match VF representors traffic which, as
-separate entities, should be addressed through their own DPDK port IDs.
-
-- Can be specified multiple times to match traffic addressed to several VF
-  IDs.
-- Can be combined with a PF item to match both PF and VF traffic.
-- Default ``mask`` matches any VF ID.
-
-.. _table_rte_flow_item_vf:
-
-.. table:: VF
-
-   +----------+----------+---------------------------+
-   | Field    | Subfield | Value                     |
-   +==========+==========+===========================+
-   | ``spec`` | ``id``   | destination VF ID         |
-   +----------+----------+---------------------------+
-   | ``last`` | ``id``   | upper range value         |
-   +----------+----------+---------------------------+
-   | ``mask`` | ``id``   | zeroed to match any VF ID |
-   +----------+----------+---------------------------+
-
-Item: ``PHY_PORT``
-^^^^^^^^^^^^^^^^^^
-
-Matches traffic originating from (ingress) or going to (egress) a physical
-port of the underlying device.
-
-The first PHY_PORT item overrides the physical port normally associated with
-the specified DPDK input port (port_id). This item can be provided several
-times to match additional physical ports.
-
-Note that physical ports are not necessarily tied to DPDK input ports
-(port_id) when those are not under DPDK control. Possible values are
-specific to each device, they are not necessarily indexed from zero and may
-not be contiguous.
-
-As a device property, the list of allowed values as well as the value
-associated with a port_id should be retrieved by other means.
-
-- Default ``mask`` matches any port index.
-
-.. _table_rte_flow_item_phy_port:
-
-.. table:: PHY_PORT
-
-   +----------+-----------+--------------------------------+
-   | Field    | Subfield  | Value                          |
-   +==========+===========+================================+
-   | ``spec`` | ``index`` | physical port index            |
-   +----------+-----------+--------------------------------+
-   | ``last`` | ``index`` | upper range value              |
-   +----------+-----------+--------------------------------+
-   | ``mask`` | ``index`` | zeroed to match any port index |
-   +----------+-----------+--------------------------------+
-
 Item: ``PORT_ID``
 ^^^^^^^^^^^^^^^^^
+
+This item is deprecated. Consider:
+ - `Item: PORT_REPRESENTOR`_
+ - `Item: REPRESENTED_PORT`_
 
 Matches traffic originating from (ingress) or going to (egress) a given DPDK
 port ID.
 
 Normally only supported if the port ID in question is known by the
 underlying PMD and related to the device the flow rule is created against.
-
-This must not be confused with `Item: PHY_PORT`_ which refers to the
-physical port of a device, whereas `Item: PORT_ID`_ refers to a ``struct
-rte_eth_dev`` object on the application side (also known as "port
-representor" depending on the kind of underlying device).
 
 - Default ``mask`` matches the specified DPDK port ID.
 
@@ -692,9 +624,9 @@ Item: ``META``
 Matches 32 bit metadata item set.
 
 On egress, metadata can be set either by mbuf metadata field with
-PKT_TX_DYNF_METADATA flag or ``SET_META`` action. On ingress, ``SET_META``
+RTE_MBUF_DYNFLAG_TX_METADATA flag or ``SET_META`` action. On ingress, ``SET_META``
 action sets metadata for a packet and the metadata will be reported via
-``metadata`` dynamic field of ``rte_mbuf`` with PKT_RX_DYNF_METADATA flag.
+``metadata`` dynamic field of ``rte_mbuf`` with RTE_MBUF_DYNFLAG_RX_METADATA flag.
 
 - Default ``mask`` matches the specified Rx metadata value.
 
@@ -718,9 +650,6 @@ Data matching item types
 Most of these are basically protocol header definitions with associated
 bit-masks. They must be specified (stacked) from lowest to highest protocol
 layer to form a matching pattern.
-
-The following list is not exhaustive, new protocols will be added in the
-future.
 
 Item: ``ANY``
 ^^^^^^^^^^^^^
@@ -1064,12 +993,29 @@ Matches a GRE header.
 
 Item: ``GRE_KEY``
 ^^^^^^^^^^^^^^^^^
+This action is deprecated. Consider `Item: GRE_OPTION`.
 
 Matches a GRE key field.
 This should be preceded by item ``GRE``.
 
 - Value to be matched is a big-endian 32 bit integer.
 - When this item present it implicitly match K bit in default mask as "1"
+
+Item: ``GRE_OPTION``
+^^^^^^^^^^^^^^^^^^^^
+
+Matches a GRE optional fields (checksum/key/sequence).
+This should be preceded by item ``GRE``.
+
+- ``checksum``: checksum.
+- ``key``: key.
+- ``sequence``: sequence.
+- The items in GRE_OPTION do not change bit flags(c_bit/k_bit/s_bit) in GRE
+  item. The bit flags need be set with GRE item by application. When the items
+  present, the corresponding bits in GRE spec and mask should be set "1" by
+  application, it means to match specified value of the fields. When the items
+  no present, but the corresponding bits in GRE spec and mask is "1", it means
+  to match any value of the fields.
 
 Item: ``FUZZY``
 ^^^^^^^^^^^^^^^
@@ -1403,6 +1349,195 @@ Matches a eCPRI header.
 - ``hdr``: eCPRI header definition (``rte_ecpri.h``).
 - Default ``mask`` matches nothing, for all eCPRI messages.
 
+Item: ``PACKET_INTEGRITY_CHECKS``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Matches packet integrity.
+For some devices application needs to enable integration checks in HW
+before using this item.
+
+- ``level``: the encapsulation level that should be checked:
+   - ``level == 0`` means the default PMD mode (can be inner most / outermost).
+   - ``level == 1`` means outermost header.
+   - ``level > 1``  means inner header. See also RSS level.
+- ``packet_ok``: All HW packet integrity checks have passed based on the
+  topmost network layer. For example, for ICMP packet the topmost network
+  layer is L3 and for TCP or UDP packet the topmost network layer is L4.
+- ``l2_ok``: all layer 2 HW integrity checks passed.
+- ``l3_ok``: all layer 3 HW integrity checks passed.
+- ``l4_ok``: all layer 4 HW integrity checks passed.
+- ``l2_crc_ok``: layer 2 CRC check passed.
+- ``ipv4_csum_ok``: IPv4 checksum check passed.
+- ``l4_csum_ok``: layer 4 checksum check passed.
+- ``l3_len_ok``: the layer 3 length is smaller than the frame length.
+
+Item: ``CONNTRACK``
+^^^^^^^^^^^^^^^^^^^
+
+Matches a conntrack state after conntrack action.
+
+- ``flags``: conntrack packet state flags.
+- Default ``mask`` matches all state bits.
+
+Item: ``PORT_REPRESENTOR``
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Matches traffic entering the embedded switch from the given ethdev.
+
+Term **ethdev** and the concept of **port representor** are synonymous.
+The **represented port** is an *entity* plugged to the embedded switch
+at the opposite end of the "wire" leading to the ethdev.
+
+::
+
+    .--------------------.
+    |  PORT_REPRESENTOR  |  Ethdev (Application Port Referred to by its ID)
+    '--------------------'
+              ||
+              \/
+      .----------------.
+      |  Logical Port  |
+      '----------------'
+              ||
+              ||
+              ||
+              \/
+         .----------.
+         |  Switch  |
+         '----------'
+              :
+               :
+              :
+               :
+      .----------------.
+      |  Logical Port  |
+      '----------------'
+              :
+               :
+    .--------------------.
+    |  REPRESENTED_PORT  |  Net / Guest / Another Ethdev (Same Application)
+    '--------------------'
+
+
+- Incompatible with `Attribute: Traffic direction`_.
+- Requires `Attribute: Transfer`_.
+
+.. _table_rte_flow_item_ethdev:
+
+.. table:: ``struct rte_flow_item_ethdev``
+
+   +----------+-------------+---------------------------+
+   | Field    | Subfield    | Value                     |
+   +==========+=============+===========================+
+   | ``spec`` | ``port_id`` | ethdev port ID            |
+   +----------+-------------+---------------------------+
+   | ``last`` | ``port_id`` | upper range value         |
+   +----------+-------------+---------------------------+
+   | ``mask`` | ``port_id`` | zeroed for wildcard match |
+   +----------+-------------+---------------------------+
+
+- Default ``mask`` provides exact match behaviour.
+
+See also `Action: PORT_REPRESENTOR`_.
+
+Item: ``REPRESENTED_PORT``
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Matches traffic entering the embedded switch from
+the entity represented by the given ethdev.
+
+Term **ethdev** and the concept of **port representor** are synonymous.
+The **represented port** is an *entity* plugged to the embedded switch
+at the opposite end of the "wire" leading to the ethdev.
+
+::
+
+    .--------------------.
+    |  PORT_REPRESENTOR  |  Ethdev (Application Port Referred to by its ID)
+    '--------------------'
+              :
+               :
+      .----------------.
+      |  Logical Port  |
+      '----------------'
+              :
+               :
+              :
+               :
+         .----------.
+         |  Switch  |
+         '----------'
+              /\
+              ||
+              ||
+              ||
+      .----------------.
+      |  Logical Port  |
+      '----------------'
+              /\
+              ||
+    .--------------------.
+    |  REPRESENTED_PORT  |  Net / Guest / Another Ethdev (Same Application)
+    '--------------------'
+
+
+- Incompatible with `Attribute: Traffic direction`_.
+- Requires `Attribute: Transfer`_.
+
+This item is meant to use the same structure as `Item: PORT_REPRESENTOR`_.
+
+See also `Action: REPRESENTED_PORT`_.
+
+Item: ``FLEX``
+^^^^^^^^^^^^^^
+
+Matches with the custom network protocol header that was created
+using rte_flow_flex_item_create() API. The application describes
+the desired header structure, defines the header fields attributes
+and header relations with preceding and following protocols and
+configures the ethernet devices accordingly via
+rte_flow_flex_item_create() routine.
+
+- ``handle``: the flex item handle returned by the PMD on successful
+  rte_flow_flex_item_create() call, mask for this field is ignored.
+- ``length``: match pattern length in bytes. If the length does not cover
+  all fields defined in item configuration, the pattern spec and mask are
+  considered by the driver as padded with trailing zeroes till the full
+  configured item pattern length.
+- ``pattern``: pattern to match. The pattern is concatenation of bit fields
+  configured at item creation. At configuration the fields are presented
+  by sample_data array. The order of the bitfields is defined by the order
+  of sample_data elements. The width of each bitfield is defined by the width
+  specified in the corresponding sample_data element as well. If pattern
+  length is smaller than configured fields overall length it is considered
+  as padded with trailing zeroes up to full configured length, both for
+  value and mask.
+
+Item: ``L2TPV2``
+^^^^^^^^^^^^^^^^
+
+Matches a L2TPv2 header.
+
+- ``hdr``:  header definition (``rte_l2tpv2.h``).
+- Default ``mask`` matches flags_version only.
+
+Item: ``PPP``
+^^^^^^^^^^^^^
+
+Matches a PPP header.
+
+- ``addr``: PPP address.
+- ``ctrl``: PPP control.
+- ``proto_id``: PPP protocol identifier.
+- Default ``mask`` matches addr, ctrl, proto_id.
+
+Item: ``METER_COLOR``
+^^^^^^^^^^^^^^^^^^^^^
+
+Matches Color Marker set by a Meter.
+
+- ``color``: Metering color marker.
+
 Actions
 ~~~~~~~
 
@@ -1469,9 +1604,7 @@ Actions are performed in list order:
    +=======+========+============+=======+
    | 0     | MARK   | ``mark``   | 0x2a  |
    +-------+--------+------------+-------+
-   | 1     | COUNT  | ``shared`` | 0     |
-   |       |        +------------+-------+
-   |       |        | ``id``     | 0     |
+   | 1     | COUNT  | ``id``     | 0     |
    +-------+--------+------------+-------+
    | 2     | QUEUE  | ``queue``  | 10    |
    +-------+--------+------------+-------+
@@ -1523,8 +1656,7 @@ that VOID is ignored.
 Action types
 ~~~~~~~~~~~~
 
-Common action types are described in this section. Like pattern item types,
-this list is not exhaustive as new actions will be added in the future.
+Common action types are described in this section.
 
 Action: ``END``
 ^^^^^^^^^^^^^^^
@@ -1610,12 +1742,12 @@ flow group/tables on the device, this action redirects the matched flow to
 the specified group on that device.
 
 If a matched flow is redirected to a table which doesn't contain a matching
-rule for that flow then the behavior is undefined and the resulting behavior
-is up to the specific device. Best practice when using groups would be define
+rule for that flow, then the behavior is undefined and the resulting behavior
+is up to the specific device. Best practice when using groups would be to define
 a default flow rule for each group which a defines the default actions in that
 group so a consistent behavior is defined.
 
-Defining an action for matched flow in a group to jump to a group which is
+Defining an action for a matched flow in a group to jump to a group which is
 higher in the group hierarchy may not be supported by physical devices,
 depending on how groups are mapped to the physical devices. In the
 definitions of jump actions, applications should be aware that it may be
@@ -1635,8 +1767,8 @@ flows to loop between groups.
 Action: ``MARK``
 ^^^^^^^^^^^^^^^^
 
-Attaches an integer value to packets and sets ``PKT_RX_FDIR`` and
-``PKT_RX_FDIR_ID`` mbuf flags.
+Attaches an integer value to packets and sets ``RTE_MBUF_F_RX_FDIR`` and
+``RTE_MBUF_F_RX_FDIR_ID`` mbuf flags.
 
 This value is arbitrary and application-defined. Maximum allowed value
 depends on the underlying implementation. It is returned in the
@@ -1656,7 +1788,7 @@ Action: ``FLAG``
 ^^^^^^^^^^^^^^^^
 
 Flags packets. Similar to `Action: MARK`_ without a specific value; only
-sets the ``PKT_RX_FDIR`` mbuf flag.
+sets the ``RTE_MBUF_F_RX_FDIR`` mbuf flag.
 
 - No configurable properties.
 
@@ -1713,19 +1845,8 @@ action must specify a unique id.
 Counters can be retrieved and reset through ``rte_flow_query()``, see
 ``struct rte_flow_query_count``.
 
-The shared flag indicates whether the counter is unique to the flow rule the
-action is specified with, or whether it is a shared counter.
-
-For a count action with the shared flag set, then a global device
-namespace is assumed for the counter id, so that any matched flow rules using
-a count action with the same counter id on the same port will contribute to
-that counter.
-
 For ports within the same switch domain then the counter id namespace extends
 to all ports within that switch domain.
-
-The shared flag is DEPRECATED and ``SHARED`` ``COUNT`` action should be used
-to make shared counters.
 
 .. _table_rte_flow_action_count:
 
@@ -1734,8 +1855,6 @@ to make shared counters.
    +------------+---------------------------------+
    | Field      | Value                           |
    +============+=================================+
-   | ``shared`` | DEPRECATED, shared counter flag |
-   +------------+---------------------------------+
    | ``id``     | counter id                      |
    +------------+---------------------------------+
 
@@ -1800,8 +1919,8 @@ Also, regarding packet encapsulation ``level``:
   level.
 
 - ``2`` and subsequent values request RSS to be performed on the specified
-   inner packet encapsulation level, from outermost to innermost (lower to
-   higher values).
+  inner packet encapsulation level, from outermost to innermost (lower to
+  higher values).
 
 Values other than ``0`` are not necessarily supported.
 
@@ -1814,31 +1933,33 @@ only matching traffic goes through.
 
 .. table:: RSS
 
-   +---------------+---------------------------------------------+
-   | Field         | Value                                       |
-   +===============+=============================================+
-   | ``func``      | RSS hash function to apply                  |
-   +---------------+---------------------------------------------+
-   | ``level``     | encapsulation level for ``types``           |
-   +---------------+---------------------------------------------+
-   | ``types``     | specific RSS hash types (see ``ETH_RSS_*``) |
-   +---------------+---------------------------------------------+
-   | ``key_len``   | hash key length in bytes                    |
-   +---------------+---------------------------------------------+
-   | ``queue_num`` | number of entries in ``queue``              |
-   +---------------+---------------------------------------------+
-   | ``key``       | hash key                                    |
-   +---------------+---------------------------------------------+
-   | ``queue``     | queue indices to use                        |
-   +---------------+---------------------------------------------+
+   +---------------+-------------------------------------------------+
+   | Field         | Value                                           |
+   +===============+=================================================+
+   | ``func``      | RSS hash function to apply                      |
+   +---------------+-------------------------------------------------+
+   | ``level``     | encapsulation level for ``types``               |
+   +---------------+-------------------------------------------------+
+   | ``types``     | specific RSS hash types (see ``RTE_ETH_RSS_*``) |
+   +---------------+-------------------------------------------------+
+   | ``key_len``   | hash key length in bytes                        |
+   +---------------+-------------------------------------------------+
+   | ``queue_num`` | number of entries in ``queue``                  |
+   +---------------+-------------------------------------------------+
+   | ``key``       | hash key                                        |
+   +---------------+-------------------------------------------------+
+   | ``queue``     | queue indices to use                            |
+   +---------------+-------------------------------------------------+
 
 Action: ``PF``
 ^^^^^^^^^^^^^^
 
+This action is deprecated. Consider:
+ - `Action: PORT_REPRESENTOR`_
+ - `Action: REPRESENTED_PORT`_
+
 Directs matching traffic to the physical function (PF) of the current
 device.
-
-See `Item: PF`_.
 
 - No configurable properties.
 
@@ -1855,14 +1976,16 @@ See `Item: PF`_.
 Action: ``VF``
 ^^^^^^^^^^^^^^
 
+This action is deprecated. Consider:
+ - `Action: PORT_REPRESENTOR`_
+ - `Action: REPRESENTED_PORT`_
+
 Directs matching traffic to a given virtual function of the current device.
 
-Packets matched by a VF pattern item can be redirected to their original VF
-ID instead of the specified one. This parameter may not be available and is
+Packets can be redirected to the VF they originate from,
+instead of the specified one. This parameter may not be available and is
 not guaranteed to work properly if the VF part is matched by a prior flow
 rule or if packets are not addressed to a VF in the first place.
-
-See `Item: VF`_.
 
 .. _table_rte_flow_action_vf:
 
@@ -1876,28 +1999,12 @@ See `Item: VF`_.
    | ``id``       | VF ID                          |
    +--------------+--------------------------------+
 
-Action: ``PHY_PORT``
-^^^^^^^^^^^^^^^^^^^^
-
-Directs matching traffic to a given physical port index of the underlying
-device.
-
-See `Item: PHY_PORT`_.
-
-.. _table_rte_flow_action_phy_port:
-
-.. table:: PHY_PORT
-
-   +--------------+-------------------------------------+
-   | Field        | Value                               |
-   +==============+=====================================+
-   | ``original`` | use original port index if possible |
-   +--------------+-------------------------------------+
-   | ``index``    | physical port index                 |
-   +--------------+-------------------------------------+
-
 Action: ``PORT_ID``
 ^^^^^^^^^^^^^^^^^^^
+This action is deprecated. Consider:
+ - `Action: PORT_REPRESENTOR`_
+ - `Action: REPRESENTED_PORT`_
+
 Directs matching traffic to a given DPDK port ID.
 
 See `Item: PORT_ID`_.
@@ -2005,56 +2112,9 @@ fields in the pattern items.
    | 1     | END      |
    +-------+----------+
 
-Action: ``OF_SET_MPLS_TTL``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Implements ``OFPAT_SET_MPLS_TTL`` ("MPLS TTL") as defined by the `OpenFlow
-Switch Specification`_.
-
-.. _table_rte_flow_action_of_set_mpls_ttl:
-
-.. table:: OF_SET_MPLS_TTL
-
-   +--------------+----------+
-   | Field        | Value    |
-   +==============+==========+
-   | ``mpls_ttl`` | MPLS TTL |
-   +--------------+----------+
-
-Action: ``OF_DEC_MPLS_TTL``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Implements ``OFPAT_DEC_MPLS_TTL`` ("decrement MPLS TTL") as defined by the
-`OpenFlow Switch Specification`_.
-
-.. _table_rte_flow_action_of_dec_mpls_ttl:
-
-.. table:: OF_DEC_MPLS_TTL
-
-   +---------------+
-   | Field         |
-   +===============+
-   | no properties |
-   +---------------+
-
-Action: ``OF_SET_NW_TTL``
-^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Implements ``OFPAT_SET_NW_TTL`` ("IP TTL") as defined by the `OpenFlow
-Switch Specification`_.
-
-.. _table_rte_flow_action_of_set_nw_ttl:
-
-.. table:: OF_SET_NW_TTL
-
-   +------------+--------+
-   | Field      | Value  |
-   +============+========+
-   | ``nw_ttl`` | IP TTL |
-   +------------+--------+
-
 Action: ``OF_DEC_NW_TTL``
 ^^^^^^^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Implements ``OFPAT_DEC_NW_TTL`` ("decrement IP TTL") as defined by the
 `OpenFlow Switch Specification`_.
@@ -2062,39 +2122,6 @@ Implements ``OFPAT_DEC_NW_TTL`` ("decrement IP TTL") as defined by the
 .. _table_rte_flow_action_of_dec_nw_ttl:
 
 .. table:: OF_DEC_NW_TTL
-
-   +---------------+
-   | Field         |
-   +===============+
-   | no properties |
-   +---------------+
-
-Action: ``OF_COPY_TTL_OUT``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Implements ``OFPAT_COPY_TTL_OUT`` ("copy TTL "outwards" -- from
-next-to-outermost to outermost") as defined by the `OpenFlow Switch
-Specification`_.
-
-.. _table_rte_flow_action_of_copy_ttl_out:
-
-.. table:: OF_COPY_TTL_OUT
-
-   +---------------+
-   | Field         |
-   +===============+
-   | no properties |
-   +---------------+
-
-Action: ``OF_COPY_TTL_IN``
-^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Implements ``OFPAT_COPY_TTL_IN`` ("copy TTL "inwards" -- from outermost to
-next-to-outermost") as defined by the `OpenFlow Switch Specification`_.
-
-.. _table_rte_flow_action_of_copy_ttl_in:
-
-.. table:: OF_COPY_TTL_IN
 
    +---------------+
    | Field         |
@@ -2358,6 +2385,7 @@ valid packet.
 
 Action: ``SET_IPV4_SRC``
 ^^^^^^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Set a new IPv4 source address in the outermost IPv4 header.
 
@@ -2376,6 +2404,7 @@ Otherwise, RTE_FLOW_ERROR_TYPE_ACTION error will be returned.
 
 Action: ``SET_IPV4_DST``
 ^^^^^^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Set a new IPv4 destination address in the outermost IPv4 header.
 
@@ -2394,6 +2423,7 @@ Otherwise, RTE_FLOW_ERROR_TYPE_ACTION error will be returned.
 
 Action: ``SET_IPV6_SRC``
 ^^^^^^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Set a new IPv6 source address in the outermost IPv6 header.
 
@@ -2412,6 +2442,7 @@ Otherwise, RTE_FLOW_ERROR_TYPE_ACTION error will be returned.
 
 Action: ``SET_IPV6_DST``
 ^^^^^^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Set a new IPv6 destination address in the outermost IPv6 header.
 
@@ -2430,6 +2461,7 @@ Otherwise, RTE_FLOW_ERROR_TYPE_ACTION error will be returned.
 
 Action: ``SET_TP_SRC``
 ^^^^^^^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Set a new source port number in the outermost TCP/UDP header.
 
@@ -2448,6 +2480,7 @@ flow pattern item. Otherwise, RTE_FLOW_ERROR_TYPE_ACTION error will be returned.
 
 Action: ``SET_TP_DST``
 ^^^^^^^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Set a new destination port number in the outermost TCP/UDP header.
 
@@ -2485,6 +2518,7 @@ Otherwise, RTE_FLOW_ERROR_TYPE_ACTION error will be returned.
 
 Action: ``DEC_TTL``
 ^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Decrease TTL value.
 
@@ -2503,6 +2537,7 @@ in pattern, Some PMDs will reject rule because behavior will be undefined.
 
 Action: ``SET_TTL``
 ^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Assigns a new TTL value.
 
@@ -2521,6 +2556,7 @@ in pattern, Some PMDs will reject rule because behavior will be undefined.
 
 Action: ``SET_MAC_SRC``
 ^^^^^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Set source MAC address.
 
@@ -2539,6 +2575,7 @@ Otherwise, RTE_FLOW_ERROR_TYPE_ACTION error will be returned.
 
 Action: ``SET_MAC_DST``
 ^^^^^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Set destination MAC address.
 
@@ -2557,6 +2594,7 @@ Otherwise, RTE_FLOW_ERROR_TYPE_ACTION error will be returned.
 
 Action: ``INC_TCP_SEQ``
 ^^^^^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Increase sequence number in the outermost TCP header.
 Value to increase TCP sequence number by is a big-endian 32 bit integer.
@@ -2565,6 +2603,7 @@ Using this action on non-matching traffic will result in undefined behavior.
 
 Action: ``DEC_TCP_SEQ``
 ^^^^^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Decrease sequence number in the outermost TCP header.
 Value to decrease TCP sequence number by is a big-endian 32 bit integer.
@@ -2573,6 +2612,7 @@ Using this action on non-matching traffic will result in undefined behavior.
 
 Action: ``INC_TCP_ACK``
 ^^^^^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Increase acknowledgment number in the outermost TCP header.
 Value to increase TCP acknowledgment number by is a big-endian 32 bit integer.
@@ -2581,6 +2621,7 @@ Using this action on non-matching traffic will result in undefined behavior.
 
 Action: ``DEC_TCP_ACK``
 ^^^^^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Decrease acknowledgment number in the outermost TCP header.
 Value to decrease TCP acknowledgment number by is a big-endian 32 bit integer.
@@ -2589,6 +2630,7 @@ Using this action on non-matching traffic will result in undefined behavior.
 
 Action: ``SET_TAG``
 ^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Set Tag.
 
@@ -2611,13 +2653,14 @@ application. Multiple tags are supported by specifying index.
 
 Action: ``SET_META``
 ^^^^^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Set metadata. Item ``META`` matches metadata.
 
-Metadata set by mbuf metadata field with PKT_TX_DYNF_METADATA flag on egress
+Metadata set by mbuf metadata field with RTE_MBUF_DYNFLAG_TX_METADATA flag on egress
 will be overridden by this action. On ingress, the metadata will be carried by
 ``metadata`` dynamic field of ``rte_mbuf`` which can be accessed by
-``RTE_FLOW_DYNF_METADATA()``. PKT_RX_DYNF_METADATA flag will be set along
+``RTE_FLOW_DYNF_METADATA()``. RTE_MBUF_DYNFLAG_RX_METADATA flag will be set along
 with the data.
 
 The mbuf dynamic field must be registered by calling
@@ -2645,6 +2688,7 @@ used to connect the Rx and Tx flows if it can be propagated from Rx to Tx path.
 
 Action: ``SET_IPV4_DSCP``
 ^^^^^^^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Set IPv4 DSCP.
 
@@ -2665,6 +2709,7 @@ Otherwise, RTE_FLOW_ERROR_TYPE_ACTION error will be returned.
 
 Action: ``SET_IPV6_DSCP``
 ^^^^^^^^^^^^^^^^^^^^^^^^^
+This is a legacy action. Consider `Action: MODIFY_FIELD`_ as alternative.
 
 Set IPv6 DSCP.
 
@@ -2722,6 +2767,25 @@ shared AGE action, or a flow rule using the AGE action:
    | ``sec_since_last_hit``       | out | Seconds since last traffic hit         |
    +------------------------------+-----+----------------------------------------+
 
+Update structure to modify the parameters of an indirect AGE action.
+The update structure is used by ``rte_flow_action_handle_update()`` function.
+
+.. _table_rte_flow_update_age:
+
+.. table:: AGE update
+
+   +-------------------+--------------------------------------------------------------+
+   | Field             | Value                                                        |
+   +===================+==============================================================+
+   | ``reserved``      | 6 bits reserved, must be zero                                |
+   +-------------------+--------------------------------------------------------------+
+   | ``timeout_valid`` | 1 bit, timeout value is valid                                |
+   +-------------------+--------------------------------------------------------------+
+   | ``timeout``       | 24 bits timeout value                                        |
+   +-------------------+--------------------------------------------------------------+
+   | ``touch``         | 1 bit, touch the AGE action to set ``sec_since_last_hit`` 0  |
+   +-------------------+--------------------------------------------------------------+
+
 Action: ``SAMPLE``
 ^^^^^^^^^^^^^^^^^^
 
@@ -2747,24 +2811,418 @@ packets, and must have a fate action.
    | ``actions``  | sub-action list for sampling    |
    +--------------+---------------------------------+
 
-Action: ``SHARED``
-^^^^^^^^^^^^^^^^^^
+Action: ``INDIRECT``
+^^^^^^^^^^^^^^^^^^^^
 
-Flow utilize shared action by handle as returned from
-``rte_flow_shared_action_create()``.
+Flow utilize indirect action by handle as returned from
+``rte_flow_action_handle_create()``.
 
-The behaviour of the shared action defined by ``action`` argument of type
-``struct rte_flow_action`` passed to ``rte_flow_shared_action_create()``.
+The behaviour of the indirect action defined by ``action`` argument of type
+``struct rte_flow_action`` passed to ``rte_flow_action_handle_create()``.
 
-.. _table_rte_flow_shared_action:
+The indirect action can be used by a single flow or shared among multiple flows.
+The indirect action can be in-place updated by ``rte_flow_action_handle_update()``
+without destroying flow and creating flow again. The fields that could be
+updated depend on the type of the ``action`` and different for every type.
 
-.. table:: SHARED
+The indirect action specified data (e.g. counter) can be queried by
+``rte_flow_action_handle_query()``.
+
+.. warning::
+
+   The following description of indirect action persistence
+   is an experimental behavior that may change without a prior notice.
+
+If ``RTE_ETH_DEV_CAPA_FLOW_SHARED_OBJECT_KEEP`` is not advertised,
+indirect actions cannot be created until the device is started for the first time
+and cannot be kept when the device is stopped.
+However, PMD also does not flush them automatically on stop,
+so the application must call ``rte_flow_action_handle_destroy()``
+before stopping the device to ensure no indirect actions remain.
+
+If ``RTE_ETH_DEV_CAPA_FLOW_SHARED_OBJECT_KEEP`` is advertised,
+this means that the PMD can keep at least some indirect actions
+across device stop and start.
+However, ``rte_eth_dev_configure()`` may fail if any indirect actions remain,
+so the application must destroy them before attempting a reconfiguration.
+Keeping may be only supported for certain kinds of indirect actions.
+A kind is a combination of an action type and a value of its transfer bit.
+For example: an indirect counter with the transfer bit reset.
+To test if a particular kind of indirect actions is kept,
+the application must try to create a valid indirect action of that kind
+when the device is not started (either before the first start of after a stop).
+If it fails with an error of type ``RTE_FLOW_ERROR_TYPE_STATE``,
+application must destroy all indirect actions of this kind
+before stopping the device.
+If it succeeds, all indirect actions of the same kind are kept
+when the device is stopped.
+Indirect actions of a kept kind that are created when the device is stopped,
+including the ones created for the test, will be kept after the device start.
+
+.. _table_rte_flow_action_handle:
+
+.. table:: INDIRECT
 
    +---------------+
    | Field         |
    +===============+
    | no properties |
    +---------------+
+
+Action: ``MODIFY_FIELD``
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Modify ``dst`` field according to ``op`` selected (set, addition,
+subtraction) with ``width`` bits of data from ``src`` field.
+
+Any arbitrary header field (as well as mark, metadata or tag values)
+can be used as both source and destination fields as set by ``field``.
+The immediate value ``RTE_FLOW_FIELD_VALUE`` (or a pointer to it
+``RTE_FLOW_FIELD_POINTER``) is allowed as a source only.
+``RTE_FLOW_FIELD_START`` is used to point to the beginning of a packet.
+See ``enum rte_flow_field_id`` for the list of supported fields.
+
+``op`` selects the operation to perform on a destination field:
+
+- ``set`` copies the data from ``src`` field to ``dst`` field.
+- ``add`` adds together ``dst`` and ``src`` and stores the result into ``dst``.
+- ``sub`` subtracts ``src`` from ``dst`` and stores the result into ``dst``.
+
+``width`` defines a number of bits to use from ``src`` field.
+
+``level`` is used to access any packet field on any encapsulation level
+as well as any tag element in the tag array:
+
+- ``0`` means the default behaviour. Depending on the packet type,
+  it can mean outermost, innermost or anything in between.
+- ``1`` requests access to the outermost packet encapsulation level.
+- ``2`` and subsequent values requests access to the specified packet
+  encapsulation level, from outermost to innermost (lower to higher values).
+
+For the tag array (in case of multiple tags are supported and present)
+``level`` translates directly into the array index.
+
+``offset`` specifies the number of bits to skip from a field's start.
+That allows performing a partial copy of the needed part or to divide a big
+packet field into multiple smaller fields. Alternatively, ``offset`` allows
+going past the specified packet field boundary to copy a field to an
+arbitrary place in a packet, essentially providing a way to copy any part of
+a packet to any other part of it.
+
+``value`` sets an immediate value to be used as a source or points to a
+location of the value in memory. It is used instead of ``level`` and ``offset``
+for ``RTE_FLOW_FIELD_VALUE`` and ``RTE_FLOW_FIELD_POINTER`` respectively.
+The data in memory should be presented exactly in the same byte order and
+length as in the relevant flow item, i.e. data for field with type
+``RTE_FLOW_FIELD_MAC_DST`` should follow the conventions of ``dst`` field
+in ``rte_flow_item_eth`` structure, with type ``RTE_FLOW_FIELD_IPV6_SRC`` -
+``rte_flow_item_ipv6`` conventions, and so on. If the field size is larger than
+16 bytes the pattern can be provided as pointer only.
+
+The bitfield extracted from the memory being applied as second operation
+parameter is defined by action width and by the destination field offset.
+Application should provide the data in immediate value memory (either as
+buffer or by pointer) exactly as item field without any applied explicit offset,
+and destination packet field (with specified width and bit offset) will be
+replaced by immediate source bits from the same bit offset. For example,
+to replace the third byte of MAC address with value 0x85, application should
+specify destination width as 8, destination offset as 16, and provide immediate
+value as sequence of bytes {xxx, xxx, 0x85, xxx, xxx, xxx}.
+
+.. _table_rte_flow_action_modify_field:
+
+.. table:: MODIFY_FIELD
+
+   +---------------+-------------------------+
+   | Field         | Value                   |
+   +===============+=========================+
+   | ``op``        | operation to perform    |
+   +---------------+-------------------------+
+   | ``dst``       | destination field       |
+   +---------------+-------------------------+
+   | ``src``       | source field            |
+   +---------------+-------------------------+
+   | ``width``     | number of bits to use   |
+   +---------------+-------------------------+
+
+.. _table_rte_flow_action_modify_data:
+
+.. table:: destination/source field definition
+
+   +---------------+----------------------------------------------------------+
+   | Field         | Value                                                    |
+   +===============+==========================================================+
+   | ``field``     | ID: packet field, mark, meta, tag, immediate, pointer    |
+   +---------------+----------------------------------------------------------+
+   | ``level``     | encapsulation level of a packet field or tag array index |
+   +---------------+----------------------------------------------------------+
+   | ``offset``    | number of bits to skip at the beginning                  |
+   +---------------+----------------------------------------------------------+
+   | ``value``     | immediate value buffer (source field only, not           |
+   |               | applicable to destination) for RTE_FLOW_FIELD_VALUE      |
+   |               | field type                                               |
+   +---------------+----------------------------------------------------------+
+   | ``pvalue``    | pointer to immediate value data (source field only, not  |
+   |               | applicable to destination) for RTE_FLOW_FIELD_POINTER    |
+   |               | field type                                               |
+   +---------------+----------------------------------------------------------+
+
+Action: ``CONNTRACK``
+^^^^^^^^^^^^^^^^^^^^^
+
+Create a conntrack (connection tracking) context with the provided information.
+
+In stateful session like TCP, the conntrack action provides the ability to
+examine every packet of this connection and associate the state to every
+packet. It will help to realize the stateful offload of connections with little
+software participation. For example, the packets with invalid state may be
+handled by the software. The control packets could be handled in the hardware.
+The software just need to query the state of a connection when needed, and then
+decide how to handle the flow rules and conntrack context.
+
+A conntrack context should be created via ``rte_flow_action_handle_create()``
+before using. Then the handle with ``INDIRECT`` type is used for a flow rule
+creation. If a flow rule with an opposite direction needs to be created, the
+``rte_flow_action_handle_update()`` should be used to modify the direction.
+
+Not all the fields of the ``struct rte_flow_action_conntrack`` will be used
+for a conntrack context creating, depending on the HW, and they should be
+in host byte order. PMD should convert them into network byte order when
+needed by the HW.
+
+The ``struct rte_flow_modify_conntrack`` should be used for an updating.
+
+The current conntrack context information could be queried via the
+``rte_flow_action_handle_query()`` interface.
+
+.. _table_rte_flow_action_conntrack:
+
+.. table:: CONNTRACK
+
+   +--------------------------+-------------------------------------------------------------+
+   | Field                    | Value                                                       |
+   +==========================+=============================================================+
+   | ``peer_port``            | peer port number                                            |
+   +--------------------------+-------------------------------------------------------------+
+   | ``is_original_dir``      | direction of this connection for creating flow rule         |
+   +--------------------------+-------------------------------------------------------------+
+   | ``enable``               | enable the conntrack context                                |
+   +--------------------------+-------------------------------------------------------------+
+   | ``live_connection``      | one ack was seen for this connection                        |
+   +--------------------------+-------------------------------------------------------------+
+   | ``selective_ack``        | SACK enabled                                                |
+   +--------------------------+-------------------------------------------------------------+
+   | ``challenge_ack_passed`` | a challenge ack has passed                                  |
+   +--------------------------+-------------------------------------------------------------+
+   | ``last_direction``       | direction of the last passed packet                         |
+   +--------------------------+-------------------------------------------------------------+
+   | ``liberal_mode``         | only report state change                                    |
+   +--------------------------+-------------------------------------------------------------+
+   | ``state``                | current state                                               |
+   +--------------------------+-------------------------------------------------------------+
+   | ``max_ack_window``       | maximal window scaling factor                               |
+   +--------------------------+-------------------------------------------------------------+
+   | ``retransmission_limit`` | maximal retransmission times                                |
+   +--------------------------+-------------------------------------------------------------+
+   | ``original_dir``         | TCP parameters of the original direction                    |
+   +--------------------------+-------------------------------------------------------------+
+   | ``reply_dir``            | TCP parameters of the reply direction                       |
+   +--------------------------+-------------------------------------------------------------+
+   | ``last_window``          | window size of the last passed packet                       |
+   +--------------------------+-------------------------------------------------------------+
+   | ``last_seq``             | sequence number of the last passed packet                   |
+   +--------------------------+-------------------------------------------------------------+
+   | ``last_ack``             | acknowledgment number the last passed packet                |
+   +--------------------------+-------------------------------------------------------------+
+   | ``last_end``             | sum of ack number and length of the last passed packet      |
+   +--------------------------+-------------------------------------------------------------+
+
+.. _table_rte_flow_tcp_dir_param:
+
+.. table:: configuration parameters for each direction
+
+   +---------------------+---------------------------------------------------------+
+   | Field               | Value                                                   |
+   +=====================+=========================================================+
+   | ``scale``           | TCP window scaling factor                               |
+   +---------------------+---------------------------------------------------------+
+   | ``close_initiated`` | FIN sent from this direction                            |
+   +---------------------+---------------------------------------------------------+
+   | ``last_ack_seen``   | an ACK packet received                                  |
+   +---------------------+---------------------------------------------------------+
+   | ``data_unacked``    | unacknowledged data for packets from this direction     |
+   +---------------------+---------------------------------------------------------+
+   | ``sent_end``        | max{seq + len} seen in sent packets                     |
+   +---------------------+---------------------------------------------------------+
+   | ``reply_end``       | max{sack + max{win, 1}} seen in reply packets           |
+   +---------------------+---------------------------------------------------------+
+   | ``max_win``         | max{max{win, 1}} + {sack - ack} seen in sent packets    |
+   +---------------------+---------------------------------------------------------+
+   | ``max_ack``         | max{ack} + seen in sent packets                         |
+   +---------------------+---------------------------------------------------------+
+
+.. _table_rte_flow_modify_conntrack:
+
+.. table:: update a conntrack context
+
+   +----------------+-------------------------------------------------+
+   | Field          | Value                                           |
+   +================+=================================================+
+   | ``new_ct``     | new conntrack information                       |
+   +----------------+-------------------------------------------------+
+   | ``direction``  | direction will be updated                       |
+   +----------------+-------------------------------------------------+
+   | ``state``      | other fields except direction will be updated   |
+   +----------------+-------------------------------------------------+
+   | ``reserved``   | reserved bits                                   |
+   +----------------+-------------------------------------------------+
+
+Action: ``METER_COLOR``
+^^^^^^^^^^^^^^^^^^^^^^^
+
+Color the packet to reflect the meter color result.
+
+The meter action must be configured before meter color action.
+Meter color action is set to a color to reflect the meter color result.
+Set the meter color in the mbuf to the selected color.
+The meter color action output color is the output color of the packet,
+which is set in the packet meta-data (i.e. struct ``rte_mbuf::sched::color``)
+
+.. _table_rte_flow_action_meter_color:
+
+.. table:: METER_COLOR
+
+   +-----------------+--------------+
+   | Field           | Value        |
+   +=================+==============+
+   | ``meter_color`` | Packet color |
+   +-----------------+--------------+
+
+Action: ``PORT_REPRESENTOR``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+At embedded switch level, send matching traffic to the given ethdev.
+
+Term **ethdev** and the concept of **port representor** are synonymous.
+The **represented port** is an *entity* plugged to the embedded switch
+at the opposite end of the "wire" leading to the ethdev.
+
+::
+
+    .--------------------.
+    |  PORT_REPRESENTOR  |  Ethdev (Application Port Referred to by its ID)
+    '--------------------'
+              /\
+              ||
+      .----------------.
+      |  Logical Port  |
+      '----------------'
+              /\
+              ||
+              ||
+              ||
+         .----------.       .--------------------.
+         |  Switch  |  <==  |  Matching Traffic  |
+         '----------'       '--------------------'
+              :
+               :
+              :
+               :
+      .----------------.
+      |  Logical Port  |
+      '----------------'
+              :
+               :
+    .--------------------.
+    |  REPRESENTED_PORT  |  Net / Guest / Another Ethdev (Same Application)
+    '--------------------'
+
+
+- Requires `Attribute: Transfer`_.
+
+.. _table_rte_flow_action_ethdev:
+
+.. table:: ``struct rte_flow_action_ethdev``
+
+   +-------------+----------------+
+   | Field       | Value          |
+   +=============+================+
+   | ``port_id`` | ethdev port ID |
+   +-------------+----------------+
+
+See also `Item: PORT_REPRESENTOR`_.
+
+Action: ``REPRESENTED_PORT``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+At embedded switch level, send matching traffic to
+the entity represented by the given ethdev.
+
+Term **ethdev** and the concept of **port representor** are synonymous.
+The **represented port** is an *entity* plugged to the embedded switch
+at the opposite end of the "wire" leading to the ethdev.
+
+::
+
+    .--------------------.
+    |  PORT_REPRESENTOR  |  Ethdev (Application Port Referred to by its ID)
+    '--------------------'
+              :
+               :
+      .----------------.
+      |  Logical Port  |
+      '----------------'
+              :
+               :
+              :
+               :
+         .----------.       .--------------------.
+         |  Switch  |  <==  |  Matching Traffic  |
+         '----------'       '--------------------'
+              ||
+              ||
+              ||
+              \/
+      .----------------.
+      |  Logical Port  |
+      '----------------'
+              ||
+              \/
+    .--------------------.
+    |  REPRESENTED_PORT  |  Net / Guest / Another Ethdev (Same Application)
+    '--------------------'
+
+
+- Requires `Attribute: Transfer`_.
+
+This action is meant to use the same structure as `Action: PORT_REPRESENTOR`_.
+
+See also `Item: REPRESENTED_PORT`_.
+
+Action: ``METER_MARK``
+^^^^^^^^^^^^^^^^^^^^^^
+
+Meters a packet stream and marks its packets with colors.
+
+Unlike the ``METER`` action, policing is optional and may be
+performed later with the help of the ``METER_COLOR`` item.
+The profile and/or policy objects have to be created
+using the rte_mtr_profile_add()/rte_mtr_policy_add() API.
+Pointers to these objects are used as action parameters
+and need to be retrieved using the rte_mtr_profile_get() API
+and rte_mtr_policy_get() API respectively.
+
+.. _table_rte_flow_action_meter_mark:
+
+.. table:: METER_MARK
+
+   +------------------+----------------------+
+   | Field            | Value                |
+   +==================+======================+
+   | ``profile``      | Meter profile object |
+   +------------------+----------------------+
+   | ``policy``       | Meter policy object  |
+   +------------------+----------------------+
 
 Negative types
 ~~~~~~~~~~~~~~
@@ -2780,19 +3238,6 @@ A method to generate them remains to be defined.
 
 Application may use PMD dynamic items or actions in flow rules. In that case
 size of configuration object in dynamic element must be a pointer size.
-
-Planned types
-~~~~~~~~~~~~~
-
-Pattern item types will be added as new protocols are implemented.
-
-Variable headers support through dedicated pattern items, for example in
-order to match specific IPv4 options and IPv6 extension headers would be
-stacked after IPv4/IPv6 items.
-
-Other action types are planned but are not defined yet. These include the
-ability to alter packet data in several ways, such as performing
-encapsulation/decapsulation of tunnel headers.
 
 Rules management
 ----------------
@@ -2981,6 +3426,368 @@ Return values:
 
 - 0 on success, a negative errno value otherwise and ``rte_errno`` is set.
 
+Flow engine configuration
+-------------------------
+
+Configure flow API management.
+
+An application may provide some parameters at the initialization phase about
+rules engine configuration and/or expected flow rules characteristics.
+These parameters may be used by PMD to preallocate resources and configure NIC.
+
+Configuration
+~~~~~~~~~~~~~
+
+This function performs the flow API engine configuration and allocates
+requested resources beforehand to avoid costly allocations later.
+Expected number of resources in an application allows PMD to prepare
+and optimize NIC hardware configuration and memory layout in advance.
+``rte_flow_configure()`` must be called before any flow rule is created,
+but after an Ethernet device is configured.
+It also creates flow queues for asynchronous flow rules operations via
+queue-based API, see `Asynchronous operations`_ section.
+
+.. code-block:: c
+
+   int
+   rte_flow_configure(uint16_t port_id,
+                      const struct rte_flow_port_attr *port_attr,
+                      uint16_t nb_queue,
+                      const struct rte_flow_queue_attr *queue_attr[],
+                      struct rte_flow_error *error);
+
+Information about the number of available resources can be retrieved via
+``rte_flow_info_get()`` API.
+
+.. code-block:: c
+
+   int
+   rte_flow_info_get(uint16_t port_id,
+                     struct rte_flow_port_info *port_info,
+                     struct rte_flow_queue_info *queue_info,
+                     struct rte_flow_error *error);
+
+Flow templates
+~~~~~~~~~~~~~~
+
+Oftentimes in an application, many flow rules share a common structure
+(the same pattern and/or action list) so they can be grouped and classified
+together. This knowledge may be used as a source of optimization by a PMD/HW.
+The flow rule creation is done by selecting a table, a pattern template
+and an actions template (which are bound to the table), and setting unique
+values for the items and actions. This API is not thread-safe.
+
+Pattern templates
+^^^^^^^^^^^^^^^^^
+
+The pattern template defines a common pattern (the item mask) without values.
+The mask value is used to select a field to match on, spec/last are ignored.
+The pattern template may be used by multiple tables and must not be destroyed
+until all these tables are destroyed first.
+
+.. code-block:: c
+
+   struct rte_flow_pattern_template *
+   rte_flow_pattern_template_create(uint16_t port_id,
+       const struct rte_flow_pattern_template_attr *template_attr,
+       const struct rte_flow_item pattern[],
+       struct rte_flow_error *error);
+
+For example, to create a pattern template to match on the destination MAC:
+
+.. code-block:: c
+
+   const struct rte_flow_pattern_template_attr attr = {.ingress = 1};
+   struct rte_flow_item_eth eth_m = {
+       .dst.addr_bytes = "\xff\xff\xff\xff\xff\xff";
+   };
+   struct rte_flow_item pattern[] = {
+       [0] = {.type = RTE_FLOW_ITEM_TYPE_ETH,
+              .mask = &eth_m},
+       [1] = {.type = RTE_FLOW_ITEM_TYPE_END,},
+   };
+   struct rte_flow_error err;
+
+   struct rte_flow_pattern_template *pattern_template =
+           rte_flow_pattern_template_create(port, &attr, &pattern, &err);
+
+The concrete value to match on will be provided at the rule creation.
+
+Actions templates
+^^^^^^^^^^^^^^^^^
+
+The actions template holds a list of action types to be used in flow rules.
+The mask parameter allows specifying a shared constant value for every rule.
+The actions template may be used by multiple tables and must not be destroyed
+until all these tables are destroyed first.
+
+.. code-block:: c
+
+   struct rte_flow_actions_template *
+   rte_flow_actions_template_create(uint16_t port_id,
+       const struct rte_flow_actions_template_attr *template_attr,
+       const struct rte_flow_action actions[],
+       const struct rte_flow_action masks[],
+       struct rte_flow_error *error);
+
+For example, to create an actions template with the same Mark ID
+but different Queue Index for every rule:
+
+.. code-block:: c
+
+   rte_flow_actions_template_attr attr = {.ingress = 1};
+   struct rte_flow_action act[] = {
+   /* Mark ID is 4 for every rule, Queue Index is unique */
+       [0] = {.type = RTE_FLOW_ACTION_TYPE_MARK,
+              .conf = &(struct rte_flow_action_mark){.id = 4}},
+       [1] = {.type = RTE_FLOW_ACTION_TYPE_QUEUE},
+       [2] = {.type = RTE_FLOW_ACTION_TYPE_END,},
+   };
+   struct rte_flow_action msk[] = {
+   /* Assign to MARK mask any non-zero value to make it constant */
+       [0] = {.type = RTE_FLOW_ACTION_TYPE_MARK,
+              .conf = &(struct rte_flow_action_mark){.id = 1}},
+       [1] = {.type = RTE_FLOW_ACTION_TYPE_QUEUE},
+       [2] = {.type = RTE_FLOW_ACTION_TYPE_END,},
+   };
+   struct rte_flow_error err;
+
+   struct rte_flow_actions_template *actions_template =
+           rte_flow_actions_template_create(port, &attr, &act, &msk, &err);
+
+The concrete value for Queue Index will be provided at the rule creation.
+
+Template table
+^^^^^^^^^^^^^^
+
+A template table combines a number of pattern and actions templates along with
+shared flow rule attributes (group ID, priority and traffic direction).
+This way a PMD/HW can prepare all the resources needed for efficient flow rules
+creation in the datapath. To avoid any hiccups due to memory reallocation,
+the maximum number of flow rules is defined at table creation time.
+Any flow rule creation beyond the maximum table size is rejected.
+Application may create another table to accommodate more rules in this case.
+
+.. code-block:: c
+
+   struct rte_flow_template_table *
+   rte_flow_template_table_create(uint16_t port_id,
+       const struct rte_flow_template_table_attr *table_attr,
+       struct rte_flow_pattern_template *pattern_templates[],
+       uint8_t nb_pattern_templates,
+       struct rte_flow_actions_template *actions_templates[],
+       uint8_t nb_actions_templates,
+       struct rte_flow_error *error);
+
+A table can be created only after the Flow Rules management is configured
+and pattern and actions templates are created.
+
+.. code-block:: c
+
+   rte_flow_template_table_attr table_attr = {
+       .flow_attr.ingress = 1,
+       .nb_flows = 10000;
+   };
+   uint8_t nb_pattern_templ = 1;
+   struct rte_flow_pattern_template *pattern_templates[nb_pattern_templ];
+   pattern_templates[0] = pattern_template;
+   uint8_t nb_actions_templ = 1;
+   struct rte_flow_actions_template *actions_templates[nb_actions_templ];
+   actions_templates[0] = actions_template;
+   struct rte_flow_error error;
+
+   struct rte_flow_template_table *table =
+           rte_flow_template_table_create(port, &table_attr,
+                   &pattern_templates, nb_pattern_templ,
+                   &actions_templates, nb_actions_templ,
+                   &error);
+
+Asynchronous operations
+-----------------------
+
+Flow rules management can be done via special lockless flow management queues.
+
+- Queue operations are asynchronous and not thread-safe.
+
+- Operations can thus be invoked by the app's datapath,
+  packet processing can continue while queue operations are processed by NIC.
+
+- Number of flow queues is configured at initialization stage.
+
+- Available operation types: rule creation, rule destruction,
+  indirect rule creation, indirect rule destruction, indirect rule update.
+
+- Operations may be reordered within a queue.
+
+- Operations can be postponed and pushed to NIC in batches.
+
+- Results pulling must be done on time to avoid queue overflows.
+
+- User data is returned as part of the result to identify an operation.
+
+- Flow handle is valid once the creation operation is enqueued and must be
+  destroyed even if the operation is not successful and the rule is not inserted.
+
+- Application must wait for the creation operation result before enqueueing
+  the deletion operation to make sure the creation is processed by NIC.
+
+The asynchronous flow rule insertion logic can be broken into two phases.
+
+1. Initialization stage as shown here:
+
+.. _figure_rte_flow_async_init:
+
+.. figure:: img/rte_flow_async_init.*
+
+2. Main loop as presented on a datapath application example:
+
+.. _figure_rte_flow_async_usage:
+
+.. figure:: img/rte_flow_async_usage.*
+
+Enqueue creation operation
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Enqueueing a flow rule creation operation is similar to simple creation.
+
+.. code-block:: c
+
+   struct rte_flow *
+   rte_flow_async_create(uint16_t port_id,
+                         uint32_t queue_id,
+                         const struct rte_flow_op_attr *op_attr,
+                         struct rte_flow_template_table *template_table,
+                         const struct rte_flow_item pattern[],
+                         uint8_t pattern_template_index,
+                         const struct rte_flow_action actions[],
+                         uint8_t actions_template_index,
+                         void *user_data,
+                         struct rte_flow_error *error);
+
+A valid handle in case of success is returned. It must be destroyed later
+by calling ``rte_flow_async_destroy()`` even if the rule is rejected by HW.
+
+Enqueue destruction operation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Enqueueing a flow rule destruction operation is similar to simple destruction.
+
+.. code-block:: c
+
+   int
+   rte_flow_async_destroy(uint16_t port_id,
+                          uint32_t queue_id,
+                          const struct rte_flow_op_attr *op_attr,
+                          struct rte_flow *flow,
+                          void *user_data,
+                          struct rte_flow_error *error);
+
+Enqueue indirect action creation operation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Asynchronous version of indirect action creation API.
+
+.. code-block:: c
+
+   struct rte_flow_action_handle *
+   rte_flow_async_action_handle_create(uint16_t port_id,
+           uint32_t queue_id,
+           const struct rte_flow_op_attr *q_ops_attr,
+           const struct rte_flow_indir_action_conf *indir_action_conf,
+           const struct rte_flow_action *action,
+           void *user_data,
+           struct rte_flow_error *error);
+
+A valid handle in case of success is returned. It must be destroyed later by
+``rte_flow_async_action_handle_destroy()`` even if the rule was rejected.
+
+Enqueue indirect action destruction operation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Asynchronous version of indirect action destruction API.
+
+.. code-block:: c
+
+   int
+   rte_flow_async_action_handle_destroy(uint16_t port_id,
+           uint32_t queue_id,
+           const struct rte_flow_op_attr *q_ops_attr,
+           struct rte_flow_action_handle *action_handle,
+           void *user_data,
+           struct rte_flow_error *error);
+
+Enqueue indirect action update operation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Asynchronous version of indirect action update API.
+
+.. code-block:: c
+
+   int
+   rte_flow_async_action_handle_update(uint16_t port_id,
+           uint32_t queue_id,
+           const struct rte_flow_op_attr *q_ops_attr,
+           struct rte_flow_action_handle *action_handle,
+           const void *update,
+           void *user_data,
+           struct rte_flow_error *error);
+
+Enqueue indirect action query operation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Asynchronous version of indirect action query API.
+
+.. code-block:: c
+
+   int
+   rte_flow_async_action_handle_query(uint16_t port_id,
+           uint32_t queue_id,
+           const struct rte_flow_op_attr *q_ops_attr,
+           struct rte_flow_action_handle *action_handle,
+           void *data,
+           void *user_data,
+           struct rte_flow_error *error);
+
+Push enqueued operations
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Pushing all internally stored rules from a queue to the NIC.
+
+.. code-block:: c
+
+   int
+   rte_flow_push(uint16_t port_id,
+                 uint32_t queue_id,
+                 struct rte_flow_error *error);
+
+There is the postpone attribute in the queue operation attributes.
+When it is set, multiple operations can be bulked together and not sent to HW
+right away to save SW/HW interactions and prioritize throughput over latency.
+The application must invoke this function to actually push all outstanding
+operations to HW in this case.
+
+Pull enqueued operations
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Pulling asynchronous operations results.
+
+The application must invoke this function in order to complete asynchronous
+flow rule operations and to receive flow rule operations statuses.
+
+.. code-block:: c
+
+   int
+   rte_flow_pull(uint16_t port_id,
+                 uint32_t queue_id,
+                 struct rte_flow_op_result res[],
+                 uint16_t n_res,
+                 struct rte_flow_error *error);
+
+Multiple outstanding operation results can be pulled simultaneously.
+User data may be provided during a flow creation/destruction in order
+to distinguish between multiple operations. User data is returned as part
+of the result to provide a method to detect which operation is completed.
+
 .. _flow_isolated_mode:
 
 Flow isolated mode
@@ -3031,7 +3838,6 @@ port and may return errors such as ``ENOTSUP`` ("not supported"):
 - Configuring MAC addresses.
 - Configuring multicast addresses.
 - Configuring VLAN filters.
-- Configuring Rx filters through the legacy API (e.g. FDIR).
 - Configuring global RSS settings.
 
 .. code-block:: c
@@ -3258,13 +4064,7 @@ The PMD interface is defined in ``rte_flow_driver.h``. It is not subject to
 API/ABI versioning constraints as it is not exposed to applications and may
 evolve independently.
 
-It is currently implemented on top of the legacy filtering framework through
-filter type *RTE_ETH_FILTER_GENERIC* that accepts the single operation
-*RTE_ETH_FILTER_GET* to return PMD-specific *rte_flow* callbacks wrapped
-inside ``struct rte_flow_ops``.
-
-This overhead is temporarily necessary in order to keep compatibility with
-the legacy filtering framework, which should eventually disappear.
+The PMD interface is based on callbacks pointed by the ``struct rte_flow_ops``.
 
 - PMD callbacks implement exactly the interface described in `Rules
   management`_, except for the port ID argument which has already been
@@ -3287,8 +4087,6 @@ is set in ``dev_flags``, meaning the PMD is thread-safe regarding rte_flow,
 so the API level protection is disabled.
 Please note that this API-level mutex protects only rte_flow functions,
 other control path functions are not in scope.
-
-More will be added over time.
 
 Device compatibility
 --------------------
@@ -3438,22 +4236,5 @@ PMDs.
 - In order to save priority levels, PMDs may evaluate whether rules are
   likely to collide and adjust their priority accordingly.
 
-Future evolutions
------------------
-
-- A device profile selection function which could be used to force a
-  permanent profile instead of relying on its automatic configuration based
-  on existing flow rules.
-
-- A method to optimize *rte_flow* rules with specific pattern items and
-  action types generated on the fly by PMDs. DPDK should assign negative
-  numbers to these in order to not collide with the existing types. See
-  `Negative types`_.
-
-- Adding specific egress pattern items and actions as described in
-  `Attribute: Traffic direction`_.
-
-- Optional software fallback when PMDs are unable to handle requested flow
-  rules so applications do not have to implement their own.
 
 .. _OpenFlow Switch Specification: https://www.opennetworking.org/software-defined-standards/specifications/

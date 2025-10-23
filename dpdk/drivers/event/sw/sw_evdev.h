@@ -7,7 +7,7 @@
 
 #include "sw_evdev_log.h"
 #include <rte_eventdev.h>
-#include <rte_eventdev_pmd_vdev.h>
+#include <eventdev_pmd_vdev.h>
 #include <rte_atomic.h>
 
 #define SW_DEFAULT_CREDIT_QUANTA 32
@@ -259,6 +259,8 @@ struct sw_evdev {
 	uint64_t sched_no_iq_enqueues;
 	uint64_t sched_no_cq_enqueues;
 	uint64_t sched_cq_qid_called;
+	uint64_t sched_last_iter_bitmask;
+	uint8_t sched_progress_last_iter;
 
 	uint8_t started;
 	uint32_t credit_update_quanta;
@@ -293,22 +295,22 @@ uint16_t sw_event_enqueue_burst(void *port, const struct rte_event ev[],
 uint16_t sw_event_dequeue(void *port, struct rte_event *ev, uint64_t wait);
 uint16_t sw_event_dequeue_burst(void *port, struct rte_event *ev, uint16_t num,
 			uint64_t wait);
-void sw_event_schedule(struct rte_eventdev *dev);
+int32_t sw_event_schedule(struct rte_eventdev *dev);
 int sw_xstats_init(struct sw_evdev *dev);
 int sw_xstats_uninit(struct sw_evdev *dev);
 int sw_xstats_get_names(const struct rte_eventdev *dev,
 	enum rte_event_dev_xstats_mode mode, uint8_t queue_port_id,
 	struct rte_event_dev_xstats_name *xstats_names,
-	unsigned int *ids, unsigned int size);
+	uint64_t *ids, unsigned int size);
 int sw_xstats_get(const struct rte_eventdev *dev,
 		enum rte_event_dev_xstats_mode mode, uint8_t queue_port_id,
-		const unsigned int ids[], uint64_t values[], unsigned int n);
+		const uint64_t ids[], uint64_t values[], unsigned int n);
 uint64_t sw_xstats_get_by_name(const struct rte_eventdev *dev,
-		const char *name, unsigned int *id);
+		const char *name, uint64_t *id);
 int sw_xstats_reset(struct rte_eventdev *dev,
 		enum rte_event_dev_xstats_mode mode,
 		int16_t queue_port_id,
-		const uint32_t ids[],
+		const uint64_t ids[],
 		uint32_t nb_ids);
 
 int test_sw_eventdev(void);

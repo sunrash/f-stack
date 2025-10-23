@@ -51,9 +51,13 @@ struct linux_sockaddr {
 
 typedef int (*loop_func_t)(void *arg);
 
+extern __thread struct thread *pcurthread;
+
 int ff_init(int argc, char * const argv[]);
 
 void ff_run(loop_func_t loop, void *arg);
+
+void ff_stop_run(void);
 
 /* POSIX-LIKE api begin */
 
@@ -64,6 +68,15 @@ int ff_sysctl(const int *name, u_int namelen, void *oldp, size_t *oldlenp,
 
 int ff_ioctl(int fd, unsigned long request, ...);
 
+/*
+ * While get sockfd from this API, and then need set it to non-blocking mode like this,
+ * Otherwise, sometimes the socket interface will not work properly, such as `ff_write()`
+ *
+ *    int on = 1;
+ *    ff_ioctl(sockfd, FIONBIO, &on);
+ *
+ *  See also `example/main.c`
+ */
 int ff_socket(int domain, int type, int protocol);
 
 int ff_setsockopt(int s, int level, int optname, const void *optval,
@@ -87,6 +100,21 @@ int ff_getsockname(int s, struct linux_sockaddr *name,
 ssize_t ff_read(int d, void *buf, size_t nbytes);
 ssize_t ff_readv(int fd, const struct iovec *iov, int iovcnt);
 
+
+/*
+ * Write data to the socket sendspace buf.
+ *
+ * Note:
+ * The `fd` parameter need set non-blocking mode in advance if F-Stack's APP.
+ * Otherwise if the `nbytes` parameter is greater than
+ * `net.inet.tcp.sendspace + net.inet.tcp.sendbuf_inc`,
+ * the API will return -1, but not the length that has been sent.
+ *
+ * You also can modify the value of  `net.inet.tcp.sendspace`(default 16384 bytes)
+ * and `net.inet.tcp.sendbuf_inc`(default 16384 bytes) with `config.ini`.
+ * But it should be noted that not all parameters can take effect, such as 32768 and 32768.
+ * `ff_sysctl` can see there values while APP is running.
+ */
 ssize_t ff_write(int fd, const void *buf, size_t nbytes);
 ssize_t ff_writev(int fd, const struct iovec *iov, int iovcnt);
 
@@ -112,10 +140,18 @@ int ff_kevent_do_each(int kq, const struct kevent *changelist, int nchanges,
     void *eventlist, int nevents, const struct timespec *timeout,
     void (*do_each)(void **, struct kevent *));
 
+#if __GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 31)
+int ff_gettimeofday(struct timeval *tv, void *tz);
+#else
 int ff_gettimeofday(struct timeval *tv, struct timezone *tz);
+#endif
 
 int ff_dup(int oldfd);
 int ff_dup2(int oldfd, int newfd);
+
+int ff_pthread_create(pthread_t * thread, const pthread_attr_t * attr, 
+    void * (* start_routine) (void *), void * arg);
+int ff_pthread_join(pthread_t thread, void **retval);
 
 /* POSIX-LIKE api end */
 
@@ -124,6 +160,12 @@ int ff_dup2(int oldfd, int newfd);
 extern int ff_fdisused(int fd);
 
 extern int ff_getmaxfd(void);
+
+/*
+ * Get traffic for QoS or other via API.
+ * The size of buffer must >= siezof(struct ff_traffic_args), now is 32 bytes.
+ */
+void ff_get_traffic(void *buffer);
 
 /* route api begin */
 enum FF_ROUTE_CTL {
@@ -178,6 +220,22 @@ typedef int (*dispatch_func_t)(void *data, uint16_t *len,
 
 /* regist a packet dispath function */
 void ff_regist_packet_dispatcher(dispatch_func_t func);
+
+/*
+ * RAW packet send direty with DPDK by user APP.
+ *
+ * @param data
+ *   The data pointer of this packet.
+ * @param total
+ *   The total length of this packet.
+ * @param port_id
+ *   Current port of this packet.
+ *
+ * @return error_no
+ *   0 means success.
+ *  -1 means error.
+ */
+int ff_dpdk_raw_packet_send(void *data, int total, uint16_t port_id);
 
 /* dispatch api end */
 

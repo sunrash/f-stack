@@ -12,12 +12,18 @@ See Intel DPDK [linux_gsg](http://dpdk.org/doc/guides/linux_gsg/index.html)
 	mkdir /data/f-stack
 	git clone https://github.com/F-Stack/f-stack.git /data/f-stack
 
+## Install python and modules for running DPDK python scripts
+    pip3 install pyelftools --upgrade # RedHat/Centos
+    sudo apt install python # On ubuntu
+    #sudo pkg install python # On FreeBSD
+
 ## Compile DPDK
 
 Read DPDK Quick Started Guide or run the command below
 
 	cd /data/f-stack/dpdk
-	meson -Denable_kmods=true build
+	# re-enable kni now, to remove kni later
+	meson -Denable_kmods=true -Ddisable_libs=flow_classify build
 	ninja -C build
 	ninja -C build install
 
@@ -68,11 +74,12 @@ The mount point can be made permanent across reboots, by adding the following li
     cd /data/f-stack
     cd lib
     make
+    make install
 
 ### Compile Nginx
 
 	cd ../
-	cd app/nginx-1.16.1
+	cd app/nginx-1.25.2
 	./configure --prefix=/usr/local/nginx_fstack --with-ff_module
 	make
 	make install
@@ -83,7 +90,7 @@ The mount point can be made permanent across reboots, by adding the following li
 
 	cd app/redis-6.2.6/deps/jemalloc
 	./autogen.sh
-	cd app/redis-6.2.6/
+	cd ../..
 	make
 	# run with start.sh
 	./start.sh -b ./redis-server -o /path/to/redis.conf

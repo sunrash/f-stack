@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2001-2020 Intel Corporation
+ * Copyright(c) 2001-2021 Intel Corporation
  */
 
 #ifndef _IAVF_PROTOTYPE_H_
@@ -8,6 +8,8 @@
 #include "iavf_type.h"
 #include "iavf_alloc.h"
 #include "virtchnl.h"
+
+#include <rte_compat.h>
 
 /* Prototypes for shared code functions that are not in
  * the standard function pointer structures.  These are

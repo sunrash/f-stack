@@ -5,6 +5,8 @@
 #ifndef MLX5_MALLOC_H_
 #define MLX5_MALLOC_H_
 
+#include <rte_compat.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -38,7 +40,6 @@ enum mlx5_mem_flags {
  * @param sys_mem_en
  *   Use system memory or not.
  */
-__rte_internal
 void mlx5_malloc_mem_select(uint32_t sys_mem_en);
 
 /**

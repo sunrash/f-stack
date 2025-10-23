@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2015-2020
+ * Copyright(c) 2015-2020 Beijing WangXun Technology Co., Ltd.
+ * Copyright(c) 2010-2017 Intel Corporation
  */
 
 #ifndef _TXGBE_REGS_H_
@@ -301,11 +302,13 @@
 #define TXGBE_TEREDOPORT                0x01441C
 #define TXGBE_LEDCTL                    0x014424
 #define   TXGBE_LEDCTL_SEL_MASK         MS(0, 0xFFFF)
-#define   TXGBE_LEDCTL_SEL(s)           MS((s), 0x1)
-#define   TXGBE_LEDCTL_ORD_MASK          MS(16, 0xFFFF)
-#define   TXGBE_LEDCTL_ORD(s)            MS(((s)+16), 0x1)
-	/* s=UP(0),10G(1),1G(2),100M(3),BSY(4) */
-#define   TXGBE_LEDCTL_ACTIVE      (TXGBE_LEDCTL_SEL(4) | TXGBE_LEDCTL_ORD(4))
+#define   TXGBE_LEDCTL_ORD_MASK         MS(16, 0xFFFF)
+#define   TXGBE_LEDCTL_ORD_SHIFT        16
+#define   TXGBE_LEDCTL_UP		MS(0, 0x1)
+#define   TXGBE_LEDCTL_10G		MS(1, 0x1)
+#define   TXGBE_LEDCTL_1G		MS(2, 0x1)
+#define   TXGBE_LEDCTL_100M		MS(3, 0x1)
+#define   TXGBE_LEDCTL_ACTIVE		MS(4, 0x1)
 #define TXGBE_TAGTPID(i)                (0x014430 + (i) * 4) /* 0-3 */
 #define   TXGBE_TAGTPID_LSB_MASK        MS(0, 0xFFFF)
 #define   TXGBE_TAGTPID_LSB(v)          LS(v, 0, 0xFFFF)
@@ -1019,6 +1022,8 @@ enum txgbe_5tuple_protocol {
 #define   TXGBE_MACRXFLT_CTL_PASS       LS(3, 6, 0x3)
 #define   TXGBE_MACRXFLT_RXALL          MS(31, 0x1)
 
+#define TXGBE_MAC_WDG_TIMEOUT           0x01100C
+
 /******************************************************************************
  * Statistic Registers
  ******************************************************************************/
@@ -1232,6 +1237,9 @@ enum txgbe_5tuple_protocol {
 #define   TXGBE_IVAR_VLD                MS(7, 0x1)
 #define TXGBE_TCPTMR                    0x000170
 #define TXGBE_ITRSEL                    0x000180
+
+#define TXGBE_BMECTL                    0x012020
+#define TXGBE_BMEPEND                   0x000168
 
 /* P2V Mailbox */
 #define TXGBE_MBMEM(i)           (0x005000 + 0x40 * (i)) /* 0-63 */
@@ -1576,6 +1584,7 @@ enum txgbe_5tuple_protocol {
 #define TXGBE_GPIOINTMASK               0x014834
 #define TXGBE_GPIOINTTYPE               0x014838
 #define TXGBE_GPIOINTSTAT               0x014840
+#define TXGBE_GPIORAWINTSTAT            0x014844
 #define TXGBE_GPIOEOI                   0x01484C
 
 
@@ -1698,6 +1707,50 @@ enum txgbe_5tuple_protocol {
 
 #define TXGBE_REG_RSSTBL   TXGBE_RSSTBL(0)
 #define TXGBE_REG_RSSKEY   TXGBE_RSSKEY(0)
+
+static inline u32
+txgbe_map_reg(struct txgbe_hw *hw, u32 reg)
+{
+	switch (reg) {
+	case TXGBE_REG_RSSTBL:
+		if (hw->mac.type == txgbe_mac_raptor_vf)
+			reg = TXGBE_VFRSSTBL(0);
+		break;
+	case TXGBE_REG_RSSKEY:
+		if (hw->mac.type == txgbe_mac_raptor_vf)
+			reg = TXGBE_VFRSSKEY(0);
+		break;
+	default:
+		/* you should never reach here */
+		reg = TXGBE_REG_DUMMY;
+		break;
+	}
+
+	return reg;
+}
+
+/*
+ * read non-rc counters
+ */
+#define TXGBE_UPDCNT32(reg, last, cur)                           \
+do {                                                             \
+	uint32_t latest = rd32(hw, reg);                         \
+	if (hw->offset_loaded || hw->rx_loaded)			 \
+		last = 0;					 \
+	cur += (latest - last) & UINT_MAX;                       \
+	last = latest;                                           \
+} while (0)
+
+#define TXGBE_UPDCNT36(regl, last, cur)                          \
+do {                                                             \
+	uint64_t new_lsb = rd32(hw, regl);                       \
+	uint64_t new_msb = rd32(hw, regl + 4);                   \
+	uint64_t latest = ((new_msb << 32) | new_lsb);           \
+	if (hw->offset_loaded || hw->rx_loaded)			 \
+		last = 0;					 \
+	cur += (0x1000000000LL + latest - last) & 0xFFFFFFFFFLL; \
+	last = latest;                                           \
+} while (0)
 
 /**
  * register operations
@@ -1837,12 +1890,29 @@ po32m(struct txgbe_hw *hw, u32 reg, u32 mask, u32 expect, u32 *actual,
 }
 
 /* flush all write operations */
-#define txgbe_flush(hw) rd32(hw, 0x00100C)
+static inline void txgbe_flush(struct txgbe_hw *hw)
+{
+	switch (hw->mac.type) {
+	case txgbe_mac_raptor:
+		rd32(hw, TXGBE_PWR);
+		break;
+	case txgbe_mac_raptor_vf:
+		rd32(hw, TXGBE_VFSTATUS);
+		break;
+	default:
+		break;
+	}
+}
 
 #define rd32a(hw, reg, idx) ( \
 	rd32((hw), (reg) + ((idx) << 2)))
 #define wr32a(hw, reg, idx, val) \
 	wr32((hw), (reg) + ((idx) << 2), (val))
+
+#define rd32at(hw, reg, idx) \
+		rd32a(hw, txgbe_map_reg(hw, reg), idx)
+#define wr32at(hw, reg, idx, val) \
+		wr32a(hw, txgbe_map_reg(hw, reg), idx, val)
 
 #define rd32w(hw, reg, mask, slice) do { \
 	rd32((hw), reg); \

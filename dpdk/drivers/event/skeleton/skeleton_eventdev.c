@@ -12,13 +12,13 @@
 #include <rte_byteorder.h>
 #include <rte_common.h>
 #include <rte_debug.h>
-#include <rte_dev.h>
+#include <dev_driver.h>
 #include <rte_eal.h>
 #include <rte_log.h>
 #include <rte_malloc.h>
 #include <rte_memory.h>
 #include <rte_lcore.h>
-#include <rte_bus_vdev.h>
+#include <bus_vdev_driver.h>
 
 #include "skeleton_eventdev.h"
 
@@ -102,7 +102,8 @@ skeleton_eventdev_info_get(struct rte_eventdev *dev,
 	dev_info->event_dev_cap = RTE_EVENT_DEV_CAP_QUEUE_QOS |
 					RTE_EVENT_DEV_CAP_BURST_MODE |
 					RTE_EVENT_DEV_CAP_EVENT_QOS |
-					RTE_EVENT_DEV_CAP_CARRY_FLOW_ID;
+					RTE_EVENT_DEV_CAP_CARRY_FLOW_ID |
+					RTE_EVENT_DEV_CAP_MAINTENANCE_FREE;
 }
 
 static int
@@ -320,7 +321,7 @@ skeleton_eventdev_dump(struct rte_eventdev *dev, FILE *f)
 
 
 /* Initialize and register event driver with DPDK Application */
-static struct rte_eventdev_ops skeleton_eventdev_ops = {
+static struct eventdev_ops skeleton_eventdev_ops = {
 	.dev_infos_get    = skeleton_eventdev_info_get,
 	.dev_configure    = skeleton_eventdev_configure,
 	.dev_start        = skeleton_eventdev_start,
@@ -426,12 +427,12 @@ RTE_PMD_REGISTER_PCI_TABLE(event_skeleton_pci, pci_id_skeleton_map);
 /* VDEV based event device */
 
 static int
-skeleton_eventdev_create(const char *name, int socket_id)
+skeleton_eventdev_create(const char *name, int socket_id, struct rte_vdev_device *vdev)
 {
 	struct rte_eventdev *eventdev;
 
 	eventdev = rte_event_pmd_vdev_init(name,
-			sizeof(struct skeleton_eventdev), socket_id);
+			sizeof(struct skeleton_eventdev), socket_id, vdev);
 	if (eventdev == NULL) {
 		PMD_DRV_ERR("Failed to create eventdev vdev %s", name);
 		goto fail;
@@ -443,6 +444,7 @@ skeleton_eventdev_create(const char *name, int socket_id)
 	eventdev->dequeue       = skeleton_eventdev_dequeue;
 	eventdev->dequeue_burst = skeleton_eventdev_dequeue_burst;
 
+	event_dev_probing_finish(eventdev);
 	return 0;
 fail:
 	return -EFAULT;
@@ -456,7 +458,7 @@ skeleton_eventdev_probe(struct rte_vdev_device *vdev)
 	name = rte_vdev_device_name(vdev);
 	RTE_LOG(INFO, PMD, "Initializing %s on NUMA node %d\n", name,
 			rte_socket_id());
-	return skeleton_eventdev_create(name, rte_socket_id());
+	return skeleton_eventdev_create(name, rte_socket_id(), vdev);
 }
 
 static int

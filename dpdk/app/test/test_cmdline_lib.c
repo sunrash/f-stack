@@ -8,7 +8,6 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <errno.h>
-#include <termios.h>
 #include <ctype.h>
 #include <sys/queue.h>
 
@@ -21,6 +20,12 @@
 #include <cmdline.h>
 
 #include "test_cmdline.h"
+
+#ifndef RTE_EXEC_ENV_WINDOWS
+#define NULL_INPUT "/dev/null"
+#else
+#define NULL_INPUT "NUL"
+#endif
 
 /****************************************************************/
 /* static functions required for some tests */
@@ -83,18 +88,19 @@ error:
 static int
 test_cmdline_rdline_fns(void)
 {
-	struct rdline rdl;
+	struct rdline *rdl;
 	rdline_write_char_t *wc = &cmdline_write_char;
 	rdline_validate_t *v = &valid_buffer;
 	rdline_complete_t *c = &complete_buffer;
 
-	if (rdline_init(NULL, wc, v, c) >= 0)
+	rdl = rdline_new(NULL, v, c, NULL);
+	if (rdl != NULL)
 		goto error;
-	if (rdline_init(&rdl, NULL, v, c) >= 0)
+	rdl = rdline_new(wc, NULL, c, NULL);
+	if (rdl != NULL)
 		goto error;
-	if (rdline_init(&rdl, wc, NULL, c) >= 0)
-		goto error;
-	if (rdline_init(&rdl, wc, v, NULL) >= 0)
+	rdl = rdline_new(wc, v, NULL, NULL);
+	if (rdl != NULL)
 		goto error;
 	if (rdline_char_in(NULL, 0) >= 0)
 		goto error;
@@ -102,25 +108,30 @@ test_cmdline_rdline_fns(void)
 		goto error;
 	if (rdline_add_history(NULL, "history") >= 0)
 		goto error;
-	if (rdline_add_history(&rdl, NULL) >= 0)
+	if (rdline_add_history(rdl, NULL) >= 0)
 		goto error;
 	if (rdline_get_history_item(NULL, 0) != NULL)
 		goto error;
 
 	/* void functions */
+	rdline_get_history_buffer_size(NULL);
+	rdline_get_opaque(NULL);
 	rdline_newline(NULL, "prompt");
-	rdline_newline(&rdl, NULL);
+	rdline_newline(rdl, NULL);
 	rdline_stop(NULL);
 	rdline_quit(NULL);
 	rdline_restart(NULL);
 	rdline_redisplay(NULL);
 	rdline_reset(NULL);
 	rdline_clear_history(NULL);
+	rdline_free(NULL);
 
+	rdline_free(rdl);
 	return 0;
 
 error:
 	printf("Error: function accepted null parameter!\n");
+	rdline_free(rdl);
 	return -1;
 }
 
@@ -150,10 +161,10 @@ test_cmdline_socket_fns(void)
 	cl = cmdline_stdin_new(&ctx, NULL);
 	if (cl != NULL)
 		goto error;
-	cl = cmdline_file_new(NULL, "prompt", "/dev/null");
+	cl = cmdline_file_new(NULL, "prompt", NULL_INPUT);
 	if (cl != NULL)
 		goto error;
-	cl = cmdline_file_new(&ctx, NULL, "/dev/null");
+	cl = cmdline_file_new(&ctx, NULL, NULL_INPUT);
 	if (cl != NULL)
 		goto error;
 	cl = cmdline_file_new(&ctx, "prompt", NULL);
@@ -165,7 +176,7 @@ test_cmdline_socket_fns(void)
 		cmdline_free(cl);
 		return -1;
 	}
-	cl = cmdline_file_new(&ctx, "prompt", "/dev/null");
+	cl = cmdline_file_new(&ctx, "prompt", NULL_INPUT);
 	if (cl == NULL) {
 		printf("Error: failed to open /dev/null for reading!");
 		return -1;
@@ -176,7 +187,6 @@ test_cmdline_socket_fns(void)
 	/* void functions */
 	cmdline_stdin_exit(NULL);
 
-	cmdline_free(cl);
 	return 0;
 error:
 	printf("Error: function accepted null parameter!\n");
@@ -219,8 +229,7 @@ test_cmdline_fns(void)
 
 error:
 	printf("Error: function accepted null parameter!\n");
-	if (cl != NULL)
-		cmdline_free(cl);
+	cmdline_free(cl);
 	return -1;
 }
 

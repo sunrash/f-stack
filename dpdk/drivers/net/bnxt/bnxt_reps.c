@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2014-2020 Broadcom
+ * Copyright(c) 2014-2021 Broadcom
  * All rights reserved.
  */
 
@@ -29,8 +29,16 @@ static const struct eth_dev_ops bnxt_rep_dev_ops = {
 	.dev_stop = bnxt_rep_dev_stop_op,
 	.stats_get = bnxt_rep_stats_get_op,
 	.stats_reset = bnxt_rep_stats_reset_op,
-	.filter_ctrl = bnxt_filter_ctrl_op
+	.flow_ops_get = bnxt_flow_ops_get_op
 };
+
+static bool bnxt_rep_check_parent(struct bnxt_representor *rep)
+{
+	if (!rep->parent_dev->data->dev_private)
+		return false;
+
+	return true;
+}
 
 uint16_t
 bnxt_vfr_recv(uint16_t port_id, uint16_t queue_id, struct rte_mbuf *mbuf)
@@ -59,12 +67,12 @@ bnxt_vfr_recv(uint16_t port_id, uint16_t queue_id, struct rte_mbuf *mbuf)
 	mask = rep_rxr->rx_ring_struct->ring_mask;
 
 	/* Put this mbuf on the RxQ of the Representor */
-	prod_rx_buf = &rep_rxr->rx_buf_ring[rep_rxr->rx_prod & mask];
-	if (!*prod_rx_buf) {
+	prod_rx_buf = &rep_rxr->rx_buf_ring[rep_rxr->rx_raw_prod & mask];
+	if (*prod_rx_buf == NULL) {
 		*prod_rx_buf = mbuf;
 		vfr_bp->rx_bytes[que] += mbuf->pkt_len;
 		vfr_bp->rx_pkts[que]++;
-		rep_rxr->rx_prod++;
+		rep_rxr->rx_raw_prod++;
 	} else {
 		/* Representor Rx ring full, drop pkt */
 		vfr_bp->rx_drop_bytes[que] += mbuf->pkt_len;
@@ -124,8 +132,8 @@ bnxt_rep_tx_burst(void *tx_queue,
 	qid = vfr_txq->txq->queue_id;
 	vf_rep_bp = vfr_txq->bp;
 	parent = vf_rep_bp->parent_dev->data->dev_private;
-	pthread_mutex_lock(&parent->rep_info->vfr_lock);
 	ptxq = parent->tx_queues[qid];
+	pthread_mutex_lock(&ptxq->txq_lock);
 
 	ptxq->vfr_tx_cfa_action = vf_rep_bp->vfr_tx_cfa_action;
 
@@ -134,9 +142,9 @@ bnxt_rep_tx_burst(void *tx_queue,
 		vf_rep_bp->tx_pkts[qid]++;
 	}
 
-	rc = bnxt_xmit_pkts(ptxq, tx_pkts, nb_pkts);
+	rc = _bnxt_xmit_pkts(ptxq, tx_pkts, nb_pkts);
 	ptxq->vfr_tx_cfa_action = 0;
-	pthread_mutex_unlock(&parent->rep_info->vfr_lock);
+	pthread_mutex_unlock(&ptxq->txq_lock);
 
 	return rc;
 }
@@ -191,6 +199,7 @@ int bnxt_representor_init(struct rte_eth_dev *eth_dev, void *params)
 	eth_dev->data->dev_flags |= RTE_ETH_DEV_REPRESENTOR |
 					RTE_ETH_DEV_AUTOFILL_QUEUE_XSTATS;
 	eth_dev->data->representor_id = rep_params->vf_id;
+	eth_dev->data->backer_port_id = rep_params->parent_dev->data->port_id;
 
 	rte_eth_random_addr(vf_rep_bp->dflt_mac_addr);
 	memcpy(vf_rep_bp->mac_addr, vf_rep_bp->dflt_mac_addr,
@@ -213,7 +222,6 @@ int bnxt_representor_init(struct rte_eth_dev *eth_dev, void *params)
 	eth_dev->data->dev_link.link_status = link->link_status;
 	eth_dev->data->dev_link.link_autoneg = link->link_autoneg;
 
-	PMD_DRV_LOG(INFO, "calling bnxt_print_link_info\n");
 	bnxt_print_link_info(eth_dev);
 
 	PMD_DRV_LOG(INFO,
@@ -266,12 +274,12 @@ int bnxt_representor_uninit(struct rte_eth_dev *eth_dev)
 	PMD_DRV_LOG(DEBUG, "BNXT Port:%d VFR uninit\n", eth_dev->data->port_id);
 	eth_dev->data->mac_addrs = NULL;
 
-	parent_bp = rep->parent_dev->data->dev_private;
-	if (!parent_bp) {
+	if (!bnxt_rep_check_parent(rep)) {
 		PMD_DRV_LOG(DEBUG, "BNXT Port:%d already freed\n",
 			    eth_dev->data->port_id);
 		return 0;
 	}
+	parent_bp = rep->parent_dev->data->dev_private;
 
 	parent_bp->num_reps--;
 	vf_id = rep->vf_id;
@@ -319,6 +327,12 @@ static int bnxt_tf_vfr_alloc(struct rte_eth_dev *vfr_ethdev)
 		BNXT_TF_DBG(ERR, "Invalid arguments\n");
 		return 0;
 	}
+	/* update the port id so you can backtrack to ethdev */
+	vfr->dpdk_port_id = vfr_ethdev->data->port_id;
+
+	/* If pair is present, then delete the pair */
+	if (bnxt_hwrm_cfa_pair_exists(parent_bp, vfr))
+		(void)bnxt_hwrm_cfa_pair_free(parent_bp, vfr);
 
 	/* Update the ULP portdata base with the new VFR interface */
 	rc = ulp_port_db_dev_port_intf_update(parent_bp->ulp_ctx, vfr_ethdev);
@@ -389,6 +403,26 @@ static int bnxt_vfr_alloc(struct rte_eth_dev *vfr_ethdev)
 	return rc;
 }
 
+static void bnxt_vfr_rx_queue_release_mbufs(struct bnxt_rx_queue *rxq)
+{
+	struct rte_mbuf **sw_ring;
+	unsigned int i;
+
+	if (!rxq || !rxq->rx_ring)
+		return;
+
+	sw_ring = rxq->rx_ring->rx_buf_ring;
+	if (sw_ring) {
+		for (i = 0; i < rxq->rx_ring->rx_ring_struct->ring_size; i++) {
+			if (sw_ring[i]) {
+				if (sw_ring[i] != &rxq->fake_mbuf)
+					rte_pktmbuf_free_seg(sw_ring[i]);
+				sw_ring[i] = NULL;
+			}
+		}
+	}
+}
+
 static void bnxt_rep_free_rx_mbufs(struct bnxt_representor *rep_bp)
 {
 	struct bnxt_rx_queue *rxq;
@@ -396,7 +430,7 @@ static void bnxt_rep_free_rx_mbufs(struct bnxt_representor *rep_bp)
 
 	for (i = 0; i < rep_bp->rx_nr_rings; i++) {
 		rxq = rep_bp->rx_queues[i];
-		bnxt_rx_queue_release_mbufs(rxq);
+		bnxt_vfr_rx_queue_release_mbufs(rxq);
 	}
 }
 
@@ -483,8 +517,7 @@ int bnxt_rep_dev_stop_op(struct rte_eth_dev *eth_dev)
 	struct bnxt_representor *vfr_bp = eth_dev->data->dev_private;
 
 	/* Avoid crashes as we are about to free queues */
-	eth_dev->rx_pkt_burst = &bnxt_dummy_recv_pkts;
-	eth_dev->tx_pkt_burst = &bnxt_dummy_xmit_pkts;
+	bnxt_stop_rxtx(eth_dev);
 
 	BNXT_TF_DBG(DEBUG, "BNXT Port:%d VFR stop\n", eth_dev->data->port_id);
 
@@ -514,11 +547,12 @@ int bnxt_rep_dev_info_get_op(struct rte_eth_dev *eth_dev,
 	int rc = 0;
 
 	/* MAC Specifics */
-	parent_bp = rep_bp->parent_dev->data->dev_private;
-	if (!parent_bp) {
-		PMD_DRV_LOG(ERR, "Rep parent NULL!\n");
+	if (!bnxt_rep_check_parent(rep_bp)) {
+		/* Need not be an error scenario, if parent is closed first */
+		PMD_DRV_LOG(INFO, "Rep parent port does not exist.\n");
 		return rc;
 	}
+	parent_bp = rep_bp->parent_dev->data->dev_private;
 	PMD_DRV_LOG(DEBUG, "Representor dev_info_get_op\n");
 	dev_info->max_mac_addrs = parent_bp->max_l2_ctx;
 	dev_info->max_hash_mac_addrs = 0;
@@ -532,6 +566,7 @@ int bnxt_rep_dev_info_get_op(struct rte_eth_dev *eth_dev,
 	dev_info->max_tx_queues = max_rx_rings;
 	dev_info->reta_size = bnxt_rss_hash_tbl_size(parent_bp);
 	dev_info->hash_key_size = 40;
+	dev_info->dev_capa &= ~RTE_ETH_DEV_CAPA_FLOW_RULE_KEEP;
 
 	/* MTU specifics */
 	dev_info->min_mtu = RTE_ETHER_MIN_MTU;
@@ -635,7 +670,7 @@ int bnxt_rep_rx_queue_setup_op(struct rte_eth_dev *eth_dev,
 	if (eth_dev->data->rx_queues) {
 		rxq = eth_dev->data->rx_queues[queue_idx];
 		if (rxq)
-			bnxt_rx_queue_release_op(rxq);
+			bnxt_rx_queue_release_op(eth_dev, queue_idx);
 	}
 
 	rxq = rte_zmalloc_socket("bnxt_vfr_rx_queue",
@@ -645,6 +680,8 @@ int bnxt_rep_rx_queue_setup_op(struct rte_eth_dev *eth_dev,
 		PMD_DRV_LOG(ERR, "bnxt_vfr_rx_queue allocation failed!\n");
 		return -ENOMEM;
 	}
+
+	eth_dev->data->rx_queues[queue_idx] = rxq;
 
 	rxq->nb_rx_desc = nb_desc;
 
@@ -665,20 +702,19 @@ int bnxt_rep_rx_queue_setup_op(struct rte_eth_dev *eth_dev,
 	rxq->rx_ring->rx_buf_ring = buf_ring;
 	rxq->queue_id = queue_idx;
 	rxq->port_id = eth_dev->data->port_id;
-	eth_dev->data->rx_queues[queue_idx] = rxq;
 
 	return 0;
 
 out:
 	if (rxq)
-		bnxt_rep_rx_queue_release_op(rxq);
+		bnxt_rep_rx_queue_release_op(eth_dev, queue_idx);
 
 	return rc;
 }
 
-void bnxt_rep_rx_queue_release_op(void *rx_queue)
+void bnxt_rep_rx_queue_release_op(struct rte_eth_dev *dev, uint16_t queue_idx)
 {
-	struct bnxt_rx_queue *rxq = (struct bnxt_rx_queue *)rx_queue;
+	struct bnxt_rx_queue *rxq = dev->data->rx_queues[queue_idx];
 
 	if (!rxq)
 		return;
@@ -703,10 +739,10 @@ int bnxt_rep_tx_queue_setup_op(struct rte_eth_dev *eth_dev,
 	struct bnxt_tx_queue *parent_txq, *txq;
 	struct bnxt_vf_rep_tx_queue *vfr_txq;
 
-	if (queue_idx >= rep_bp->rx_nr_rings) {
+	if (queue_idx >= rep_bp->tx_nr_rings) {
 		PMD_DRV_LOG(ERR,
 			    "Cannot create Tx rings %d. %d rings available\n",
-			    queue_idx, rep_bp->rx_nr_rings);
+			    queue_idx, rep_bp->tx_nr_rings);
 		return -EINVAL;
 	}
 
@@ -733,8 +769,8 @@ int bnxt_rep_tx_queue_setup_op(struct rte_eth_dev *eth_dev,
 
 	if (eth_dev->data->tx_queues) {
 		vfr_txq = eth_dev->data->tx_queues[queue_idx];
-		bnxt_rep_tx_queue_release_op(vfr_txq);
-		vfr_txq = NULL;
+		if (vfr_txq != NULL)
+			bnxt_rep_tx_queue_release_op(eth_dev, queue_idx);
 	}
 
 	vfr_txq = rte_zmalloc_socket("bnxt_vfr_tx_queue",
@@ -763,15 +799,16 @@ int bnxt_rep_tx_queue_setup_op(struct rte_eth_dev *eth_dev,
 	return 0;
 }
 
-void bnxt_rep_tx_queue_release_op(void *tx_queue)
+void bnxt_rep_tx_queue_release_op(struct rte_eth_dev *dev, uint16_t queue_idx)
 {
-	struct bnxt_vf_rep_tx_queue *vfr_txq = tx_queue;
+	struct bnxt_vf_rep_tx_queue *vfr_txq = dev->data->tx_queues[queue_idx];
 
 	if (!vfr_txq)
 		return;
 
 	rte_free(vfr_txq->txq);
 	rte_free(vfr_txq);
+	dev->data->tx_queues[queue_idx] = NULL;
 }
 
 int bnxt_rep_stats_get_op(struct rte_eth_dev *eth_dev,
@@ -823,7 +860,7 @@ int bnxt_rep_stop_all(struct bnxt *bp)
 	if (!bp->rep_info)
 		return 0;
 
-	for (vf_id = 0; vf_id < BNXT_MAX_VF_REPS; vf_id++) {
+	for (vf_id = 0; vf_id < BNXT_MAX_VF_REPS(bp); vf_id++) {
 		rep_eth_dev = bp->rep_info[vf_id].vfr_eth_dev;
 		if (!rep_eth_dev)
 			continue;

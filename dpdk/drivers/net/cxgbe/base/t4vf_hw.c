@@ -3,7 +3,7 @@
  * All rights reserved.
  */
 
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_ether.h>
 
 #include "common.h"
@@ -468,46 +468,6 @@ int t4vf_set_params(struct adapter *adapter, unsigned int nparams,
 	return t4vf_wr_mbox(adapter, &cmd, sizeof(cmd), NULL);
 }
 
-/**
- * t4vf_fl_pkt_align - return the fl packet alignment
- * @adapter: the adapter
- *
- * T4 has a single field to specify the packing and padding boundary.
- * T5 onwards has separate fields for this and hence the alignment for
- * next packet offset is maximum of these two.
- */
-int t4vf_fl_pkt_align(struct adapter *adapter, u32 sge_control,
-		      u32 sge_control2)
-{
-	unsigned int ingpadboundary, ingpackboundary, fl_align, ingpad_shift;
-
-	/* T4 uses a single control field to specify both the PCIe Padding and
-	 * Packing Boundary.  T5 introduced the ability to specify these
-	 * separately.  The actual Ingress Packet Data alignment boundary
-	 * within Packed Buffer Mode is the maximum of these two
-	 * specifications.
-	 */
-	if (CHELSIO_CHIP_VERSION(adapter->params.chip) <= CHELSIO_T5)
-		ingpad_shift = X_INGPADBOUNDARY_SHIFT;
-	else
-		ingpad_shift = X_T6_INGPADBOUNDARY_SHIFT;
-
-	ingpadboundary = 1 << (G_INGPADBOUNDARY(sge_control) + ingpad_shift);
-
-	fl_align = ingpadboundary;
-	if (!is_t4(adapter->params.chip)) {
-		ingpackboundary = G_INGPACKBOUNDARY(sge_control2);
-		if (ingpackboundary == X_INGPACKBOUNDARY_16B)
-			ingpackboundary = 16;
-		else
-			ingpackboundary = 1 << (ingpackboundary +
-					X_INGPACKBOUNDARY_SHIFT);
-
-		fl_align = max(ingpadboundary, ingpackboundary);
-	}
-	return fl_align;
-}
-
 unsigned int t4vf_get_pf_from_vf(struct adapter *adapter)
 {
 	u32 whoami;
@@ -774,35 +734,23 @@ static int t4vf_alloc_vi(struct adapter *adapter, int port_id)
 
 int t4vf_port_init(struct adapter *adapter)
 {
-	unsigned int fw_caps = adapter->params.fw_caps_support;
-	struct fw_port_cmd port_cmd, port_rpl;
+	struct fw_port_cmd port_cmd, port_rpl, rpl;
 	struct fw_vi_cmd vi_cmd, vi_rpl;
-	fw_port_cap32_t pcaps, acaps;
+	u32 param, val, pcaps, acaps;
 	enum fw_port_type port_type;
 	int mdio_addr;
 	int ret, i;
 
+	param = (V_FW_PARAMS_MNEM(FW_PARAMS_MNEM_PFVF) |
+		 V_FW_PARAMS_PARAM_X(FW_PARAMS_PARAM_PFVF_PORT_CAPS32));
+	val = 1;
+	ret = t4vf_set_params(adapter, 1, &param, &val);
+	if (ret < 0)
+		return ret;
+
 	for_each_port(adapter, i) {
 		struct port_info *p = adap2pinfo(adapter, i);
-
-		/*
-		 * If we haven't yet determined if we're talking to Firmware
-		 * which knows the new 32-bit Port Caps, it's time to find
-		 * out now.  This will also tell new Firmware to send us Port
-		 * Status Updates using the new 32-bit Port Capabilities
-		 * version of the Port Information message.
-		 */
-		if (fw_caps == FW_CAPS_UNKNOWN) {
-			u32 param, val;
-
-			param = (V_FW_PARAMS_MNEM(FW_PARAMS_MNEM_PFVF) |
-				 V_FW_PARAMS_PARAM_X
-					 (FW_PARAMS_PARAM_PFVF_PORT_CAPS32));
-			val = 1;
-			ret = t4vf_set_params(adapter, 1, &param, &val);
-			fw_caps = (ret == 0 ? FW_CAPS32 : FW_CAPS16);
-			adapter->params.fw_caps_support = fw_caps;
-		}
+		u32 lstatus32;
 
 		ret = t4vf_alloc_vi(adapter, p->port_id);
 		if (ret < 0) {
@@ -838,15 +786,14 @@ int t4vf_port_init(struct adapter *adapter)
 			return 0;
 
 		memset(&port_cmd, 0, sizeof(port_cmd));
-		port_cmd.op_to_portid = cpu_to_be32
-				(V_FW_CMD_OP(FW_PORT_CMD) | F_FW_CMD_REQUEST |
-				F_FW_CMD_READ |
-				V_FW_PORT_CMD_PORTID(p->port_id));
-		port_cmd.action_to_len16 = cpu_to_be32
-				(V_FW_PORT_CMD_ACTION(fw_caps == FW_CAPS16 ?
-					FW_PORT_ACTION_GET_PORT_INFO :
-					FW_PORT_ACTION_GET_PORT_INFO32) |
-					FW_LEN16(port_cmd));
+		port_cmd.op_to_portid =
+			cpu_to_be32(V_FW_CMD_OP(FW_PORT_CMD) |
+				    F_FW_CMD_REQUEST | F_FW_CMD_READ |
+				    V_FW_PORT_CMD_PORTID(p->port_id));
+		val = FW_PORT_ACTION_GET_PORT_INFO32;
+		port_cmd.action_to_len16 =
+			cpu_to_be32(V_FW_PORT_CMD_ACTION(val) |
+				    FW_LEN16(port_cmd));
 		ret = t4vf_wr_mbox(adapter, &port_cmd, sizeof(port_cmd),
 				   &port_rpl);
 		if (ret != FW_SUCCESS)
@@ -855,34 +802,17 @@ int t4vf_port_init(struct adapter *adapter)
 		/*
 		 * Extract the various fields from the Port Information message.
 		 */
-		if (fw_caps == FW_CAPS16) {
-			u32 lstatus = be32_to_cpu
-					(port_rpl.u.info.lstatus_to_modtype);
+		rpl = port_rpl;
+		lstatus32 = be32_to_cpu(rpl.u.info32.lstatus32_to_cbllen32);
 
-			port_type = G_FW_PORT_CMD_PTYPE(lstatus);
-			mdio_addr = ((lstatus & F_FW_PORT_CMD_MDIOCAP) ?
-				      (int)G_FW_PORT_CMD_MDIOADDR(lstatus) :
-				      -1);
-			pcaps = fwcaps16_to_caps32
-					(be16_to_cpu(port_rpl.u.info.pcap));
-			acaps = fwcaps16_to_caps32
-					(be16_to_cpu(port_rpl.u.info.acap));
-		} else {
-			u32 lstatus32 = be32_to_cpu
-				(port_rpl.u.info32.lstatus32_to_cbllen32);
+		port_type = G_FW_PORT_CMD_PORTTYPE32(lstatus32);
+		mdio_addr = (lstatus32 & F_FW_PORT_CMD_MDIOCAP32) ?
+			    (int)G_FW_PORT_CMD_MDIOADDR32(lstatus32) : -1;
+		pcaps = be32_to_cpu(port_rpl.u.info32.pcaps32);
+		acaps = be32_to_cpu(port_rpl.u.info32.acaps32);
 
-			port_type = G_FW_PORT_CMD_PORTTYPE32(lstatus32);
-			mdio_addr = ((lstatus32 & F_FW_PORT_CMD_MDIOCAP32) ?
-				      (int)G_FW_PORT_CMD_MDIOADDR32(lstatus32) :
-				      -1);
-			pcaps = be32_to_cpu(port_rpl.u.info32.pcaps32);
-			acaps = be32_to_cpu(port_rpl.u.info32.acaps32);
-		}
-
-		p->port_type = port_type;
-		p->mdio_addr = mdio_addr;
-		p->mod_type = FW_PORT_MOD_TYPE_NA;
-		init_link_config(&p->link_cfg, pcaps, acaps);
+		t4_init_link_config(p, pcaps, acaps, mdio_addr, port_type,
+				    FW_PORT_MOD_TYPE_NA);
 	}
 	return 0;
 }

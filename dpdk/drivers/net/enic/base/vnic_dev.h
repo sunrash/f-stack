@@ -9,7 +9,7 @@
 #include <stdbool.h>
 
 #include <rte_pci.h>
-#include <rte_bus_pci.h>
+#include <bus_pci_driver.h>
 
 #include "enic_compat.h"
 #include "vnic_resource.h"
@@ -196,4 +196,8 @@ int vnic_dev_overlay_offload_cfg(struct vnic_dev *vdev, uint8_t overlay,
 	uint16_t vxlan_udp_port_number);
 int vnic_dev_capable_vxlan(struct vnic_dev *vdev);
 int vnic_dev_capable_geneve(struct vnic_dev *vdev);
+uint64_t vnic_dev_capable_cq_entry_size(struct vnic_dev *vdev);
+int vnic_dev_set_cq_entry_size(struct vnic_dev *vdev, uint32_t rq_idx,
+			       uint32_t size_flag);
+
 #endif /* _VNIC_DEV_H_ */

@@ -3,6 +3,7 @@
  */
 
 #include <getopt.h>
+#include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -861,6 +862,7 @@ run_v4(void)
 	conf.type = get_fib_type();
 	conf.default_nh = def_nh;
 	conf.max_routes = config.nb_routes * 2;
+	conf.rib_ext_sz = 0;
 	if (conf.type == RTE_FIB_DIR24_8) {
 		conf.dir24_8.nh_sz = __builtin_ctz(config.ent_sz);
 		conf.dir24_8.num_tbl8 = RTE_MIN(config.tbl8,
@@ -1061,6 +1063,7 @@ run_v6(void)
 	conf.type = get_fib_type();
 	conf.default_nh = def_nh;
 	conf.max_routes = config.nb_routes * 2;
+	conf.rib_ext_sz = 0;
 	if (conf.type == RTE_FIB6_TRIE) {
 		conf.trie.nh_sz = __builtin_ctz(config.ent_sz);
 		conf.trie.num_tbl8 = RTE_MIN(config.tbl8,

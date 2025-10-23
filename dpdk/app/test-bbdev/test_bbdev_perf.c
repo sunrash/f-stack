@@ -3,6 +3,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <inttypes.h>
 #include <math.h>
 
@@ -50,11 +51,10 @@
 #define DL_5G_BANDWIDTH 3
 #define UL_5G_LOAD_BALANCE 128
 #define DL_5G_LOAD_BALANCE 128
-#define FLR_5G_TIMEOUT 610
 #endif
 
-#ifdef RTE_BASEBAND_ACC100
-#include <rte_acc100_cfg.h>
+#ifdef RTE_BASEBAND_ACC
+#include <rte_acc_cfg.h>
 #define ACC100PF_DRIVER_NAME   ("intel_acc100_pf")
 #define ACC100VF_DRIVER_NAME   ("intel_acc100_vf")
 #define ACC100_QMGR_NUM_AQS 16
@@ -63,6 +63,14 @@
 #define ACC100_QMGR_INVALID_IDX -1
 #define ACC100_QMGR_RR 1
 #define ACC100_QOS_GBR 0
+#define ACC200PF_DRIVER_NAME   ("intel_acc200_pf")
+#define ACC200VF_DRIVER_NAME   ("intel_acc200_vf")
+#define ACC200_QMGR_NUM_AQS 16
+#define ACC200_QMGR_NUM_QGS 2
+#define ACC200_QMGR_AQ_DEPTH 5
+#define ACC200_QMGR_INVALID_IDX -1
+#define ACC200_QMGR_RR 1
+#define ACC200_QOS_GBR 0
 #endif
 
 #define OPS_CACHE_SIZE 256U
@@ -70,13 +78,12 @@
 
 #define SYNC_WAIT 0
 #define SYNC_START 1
-#define INVALID_OPAQUE -1
 
 #define INVALID_QUEUE_ID -1
 /* Increment for next code block in external HARQ memory */
 #define HARQ_INCR 32768
 /* Headroom for filler LLRs insertion in HARQ buffer */
-#define FILLER_HEADROOM 1024
+#define FILLER_HEADROOM 2048
 /* Constants from K0 computation from 3GPP 38.212 Table 5.4.2.1-2 */
 #define N_ZC_1 66 /* N = 66 Zc for BG 1 */
 #define N_ZC_2 50 /* N = 50 Zc for BG 2 */
@@ -87,6 +94,7 @@
 #define K0_3_1 56 /* K0 fraction numerator for rv 3 and BG 1 */
 #define K0_3_2 43 /* K0 fraction numerator for rv 3 and BG 2 */
 
+#define HARQ_MEM_TOLERANCE 256
 static struct test_bbdev_vector test_vector;
 
 /* Switch between PMD and Interrupt for throughput TC */
@@ -129,11 +137,12 @@ struct test_op_params {
 	struct rte_mempool *mp;
 	struct rte_bbdev_dec_op *ref_dec_op;
 	struct rte_bbdev_enc_op *ref_enc_op;
+	struct rte_bbdev_fft_op *ref_fft_op;
 	uint16_t burst_sz;
 	uint16_t num_to_process;
 	uint16_t num_lcores;
 	int vector_mask;
-	rte_atomic16_t sync;
+	uint16_t sync;
 	struct test_buffers q_bufs[RTE_MAX_NUMA_NODES][MAX_QUEUES];
 };
 
@@ -148,12 +157,13 @@ struct thread_params {
 	uint8_t iter_count;
 	double iter_average;
 	double bler;
-	rte_atomic16_t nb_dequeued;
-	rte_atomic16_t processing_status;
-	rte_atomic16_t burst_sz;
+	uint16_t nb_dequeued;
+	int16_t processing_status;
+	uint16_t burst_sz;
 	struct test_op_params *op_params;
 	struct rte_bbdev_dec_op *dec_ops[MAX_BURST];
 	struct rte_bbdev_enc_op *enc_ops[MAX_BURST];
+	struct rte_bbdev_fft_op *fft_ops[MAX_BURST];
 };
 
 #ifdef RTE_BBDEV_OFFLOAD_COST
@@ -227,6 +237,45 @@ clear_soft_out_cap(uint32_t *op_flags)
 	*op_flags &= ~RTE_BBDEV_TURBO_NEG_LLR_1_BIT_SOFT_OUT;
 }
 
+/* This API is to convert all the test vector op data entries
+ * to big endian format. It is used when the device supports
+ * the input in the big endian format.
+ */
+static inline void
+convert_op_data_to_be(void)
+{
+	struct op_data_entries *op;
+	enum op_data_type type;
+	uint8_t nb_segs, *rem_data, temp;
+	uint32_t *data, len;
+	int complete, rem, i, j;
+
+	for (type = DATA_INPUT; type < DATA_NUM_TYPES; ++type) {
+		nb_segs = test_vector.entries[type].nb_segments;
+		op = &test_vector.entries[type];
+
+		/* Invert byte endianness for all the segments */
+		for (i = 0; i < nb_segs; ++i) {
+			len = op->segments[i].length;
+			data = op->segments[i].addr;
+
+			/* Swap complete u32 bytes */
+			complete = len / 4;
+			for (j = 0; j < complete; j++)
+				data[j] = rte_bswap32(data[j]);
+
+			/* Swap any remaining bytes */
+			rem = len % 4;
+			rem_data = (uint8_t *)&data[j];
+			for (j = 0; j < rem/2; j++) {
+				temp = rem_data[j];
+				rem_data[j] = rem_data[rem - j - 1];
+				rem_data[rem - j - 1] = temp;
+			}
+		}
+	}
+}
+
 static int
 check_dev_cap(const struct rte_bbdev_info *dev_info)
 {
@@ -234,6 +283,7 @@ check_dev_cap(const struct rte_bbdev_info *dev_info)
 	unsigned int nb_inputs, nb_soft_outputs, nb_hard_outputs,
 		nb_harq_inputs, nb_harq_outputs;
 	const struct rte_bbdev_op_cap *op_cap = dev_info->drv.capabilities;
+	uint8_t dev_data_endianness = dev_info->drv.data_endianness;
 
 	nb_inputs = test_vector.entries[DATA_INPUT].nb_segments;
 	nb_soft_outputs = test_vector.entries[DATA_SOFT_OUTPUT].nb_segments;
@@ -244,6 +294,9 @@ check_dev_cap(const struct rte_bbdev_info *dev_info)
 	for (i = 0; op_cap->type != RTE_BBDEV_OP_NONE; ++i, ++op_cap) {
 		if (op_cap->type != test_vector.op_type)
 			continue;
+
+		if (dev_data_endianness == RTE_BIG_ENDIAN)
+			convert_op_data_to_be();
 
 		if (op_cap->type == RTE_BBDEV_OP_TURBO_DEC) {
 			const struct rte_bbdev_op_cap_turbo_dec *cap =
@@ -395,6 +448,19 @@ check_dev_cap(const struct rte_bbdev_info *dev_info)
 				RTE_BBDEV_LDPC_INTERNAL_HARQ_MEMORY_LOOPBACK
 					))) {
 				printf("Skip loop-back with interrupt\n");
+				return TEST_FAILED;
+			}
+			return TEST_SUCCESS;
+		} else if (op_cap->type == RTE_BBDEV_OP_FFT) {
+			const struct rte_bbdev_op_cap_fft *cap = &op_cap->cap.fft;
+
+			if (!flags_match(test_vector.fft.op_flags, cap->capability_flags)) {
+				printf("Flag Mismatch\n");
+				return TEST_FAILED;
+			}
+			if (nb_inputs > cap->num_buffers_src) {
+				printf("Too many inputs defined: %u, max: %u\n",
+					nb_inputs, cap->num_buffers_src);
 				return TEST_FAILED;
 			}
 			return TEST_SUCCESS;
@@ -656,9 +722,6 @@ add_bbdev_dev(uint8_t dev_id, struct rte_bbdev_info *info,
 		conf.ul_load_balance = UL_5G_LOAD_BALANCE;
 		conf.dl_load_balance = DL_5G_LOAD_BALANCE;
 
-		/**< FLR timeout value */
-		conf.flr_time_out = FLR_5G_TIMEOUT;
-
 		/* setup FPGA PF with configuration information */
 		ret = rte_fpga_5gnr_fec_configure(info->dev_name, &conf);
 		TEST_ASSERT_SUCCESS(ret,
@@ -666,21 +729,21 @@ add_bbdev_dev(uint8_t dev_id, struct rte_bbdev_info *info,
 				info->dev_name);
 	}
 #endif
-#ifdef RTE_BASEBAND_ACC100
+#ifdef RTE_BASEBAND_ACC
 	if ((get_init_device() == true) &&
-		(!strcmp(info->drv.driver_name, ACC100PF_DRIVER_NAME))) {
-		struct rte_acc100_conf conf;
+			(!strcmp(info->drv.driver_name, ACC100PF_DRIVER_NAME))) {
+		struct rte_acc_conf conf;
 		unsigned int i;
 
-		printf("Configure ACC100 FEC Driver %s with default values\n",
+		printf("Configure ACC100/ACC101 FEC Driver %s with default values\n",
 				info->drv.driver_name);
 
 		/* clear default configuration before initialization */
-		memset(&conf, 0, sizeof(struct rte_acc100_conf));
+		memset(&conf, 0, sizeof(struct rte_acc_conf));
 
 		/* Always set in PF mode for built-in configuration */
 		conf.pf_mode_en = true;
-		for (i = 0; i < RTE_ACC100_NUM_VFS; ++i) {
+		for (i = 0; i < RTE_ACC_NUM_VFS; ++i) {
 			conf.arb_dl_4g[i].gbr_threshold1 = ACC100_QOS_GBR;
 			conf.arb_dl_4g[i].gbr_threshold1 = ACC100_QOS_GBR;
 			conf.arb_dl_4g[i].round_robin_weight = ACC100_QMGR_RR;
@@ -717,9 +780,71 @@ add_bbdev_dev(uint8_t dev_id, struct rte_bbdev_info *info,
 		conf.q_dl_5g.aq_depth_log2 = ACC100_QMGR_AQ_DEPTH;
 
 		/* setup PF with configuration information */
-		ret = rte_acc100_configure(info->dev_name, &conf);
+		ret = rte_acc_configure(info->dev_name, &conf);
 		TEST_ASSERT_SUCCESS(ret,
 				"Failed to configure ACC100 PF for bbdev %s",
+				info->dev_name);
+	}
+	if ((get_init_device() == true) &&
+		(!strcmp(info->drv.driver_name, ACC200PF_DRIVER_NAME))) {
+		struct rte_acc_conf conf;
+		unsigned int i;
+
+		printf("Configure ACC200 FEC Driver %s with default values\n",
+				info->drv.driver_name);
+
+		/* clear default configuration before initialization */
+		memset(&conf, 0, sizeof(struct rte_acc_conf));
+
+		/* Always set in PF mode for built-in configuration */
+		conf.pf_mode_en = true;
+		for (i = 0; i < RTE_ACC_NUM_VFS; ++i) {
+			conf.arb_dl_4g[i].gbr_threshold1 = ACC200_QOS_GBR;
+			conf.arb_dl_4g[i].gbr_threshold1 = ACC200_QOS_GBR;
+			conf.arb_dl_4g[i].round_robin_weight = ACC200_QMGR_RR;
+			conf.arb_ul_4g[i].gbr_threshold1 = ACC200_QOS_GBR;
+			conf.arb_ul_4g[i].gbr_threshold1 = ACC200_QOS_GBR;
+			conf.arb_ul_4g[i].round_robin_weight = ACC200_QMGR_RR;
+			conf.arb_dl_5g[i].gbr_threshold1 = ACC200_QOS_GBR;
+			conf.arb_dl_5g[i].gbr_threshold1 = ACC200_QOS_GBR;
+			conf.arb_dl_5g[i].round_robin_weight = ACC200_QMGR_RR;
+			conf.arb_ul_5g[i].gbr_threshold1 = ACC200_QOS_GBR;
+			conf.arb_ul_5g[i].gbr_threshold1 = ACC200_QOS_GBR;
+			conf.arb_ul_5g[i].round_robin_weight = ACC200_QMGR_RR;
+			conf.arb_fft[i].gbr_threshold1 = ACC200_QOS_GBR;
+			conf.arb_fft[i].gbr_threshold1 = ACC200_QOS_GBR;
+			conf.arb_fft[i].round_robin_weight = ACC200_QMGR_RR;
+		}
+
+		conf.input_pos_llr_1_bit = true;
+		conf.output_pos_llr_1_bit = true;
+		conf.num_vf_bundles = 1; /**< Number of VF bundles to setup */
+
+		conf.q_ul_4g.num_qgroups = ACC200_QMGR_NUM_QGS;
+		conf.q_ul_4g.first_qgroup_index = ACC200_QMGR_INVALID_IDX;
+		conf.q_ul_4g.num_aqs_per_groups = ACC200_QMGR_NUM_AQS;
+		conf.q_ul_4g.aq_depth_log2 = ACC200_QMGR_AQ_DEPTH;
+		conf.q_dl_4g.num_qgroups = ACC200_QMGR_NUM_QGS;
+		conf.q_dl_4g.first_qgroup_index = ACC200_QMGR_INVALID_IDX;
+		conf.q_dl_4g.num_aqs_per_groups = ACC200_QMGR_NUM_AQS;
+		conf.q_dl_4g.aq_depth_log2 = ACC200_QMGR_AQ_DEPTH;
+		conf.q_ul_5g.num_qgroups = ACC200_QMGR_NUM_QGS;
+		conf.q_ul_5g.first_qgroup_index = ACC200_QMGR_INVALID_IDX;
+		conf.q_ul_5g.num_aqs_per_groups = ACC200_QMGR_NUM_AQS;
+		conf.q_ul_5g.aq_depth_log2 = ACC200_QMGR_AQ_DEPTH;
+		conf.q_dl_5g.num_qgroups = ACC200_QMGR_NUM_QGS;
+		conf.q_dl_5g.first_qgroup_index = ACC200_QMGR_INVALID_IDX;
+		conf.q_dl_5g.num_aqs_per_groups = ACC200_QMGR_NUM_AQS;
+		conf.q_dl_5g.aq_depth_log2 = ACC200_QMGR_AQ_DEPTH;
+		conf.q_fft.num_qgroups = ACC200_QMGR_NUM_QGS;
+		conf.q_fft.first_qgroup_index = ACC200_QMGR_INVALID_IDX;
+		conf.q_fft.num_aqs_per_groups = ACC200_QMGR_NUM_AQS;
+		conf.q_fft.aq_depth_log2 = ACC200_QMGR_AQ_DEPTH;
+
+		/* setup PF with configuration information */
+		ret = rte_acc_configure(info->dev_name, &conf);
+		TEST_ASSERT_SUCCESS(ret,
+				"Failed to configure ACC200 PF for bbdev %s",
 				info->dev_name);
 	}
 #endif
@@ -940,7 +1065,7 @@ init_op_data_objs(struct rte_bbdev_op_data *bufs,
 				op_type, n * ref_entries->nb_segments,
 				mbuf_pool->size);
 
-		if (seg->length > RTE_BBDEV_LDPC_E_MAX_MBUF) {
+		if ((seg->length + RTE_PKTMBUF_HEADROOM) > RTE_BBDEV_LDPC_E_MAX_MBUF) {
 			/*
 			 * Special case when DPDK mbuf cannot handle
 			 * the required input size
@@ -954,7 +1079,7 @@ init_op_data_objs(struct rte_bbdev_op_data *bufs,
 		bufs[i].length = 0;
 
 		if ((op_type == DATA_INPUT) || (op_type == DATA_HARQ_INPUT)) {
-			if ((op_type == DATA_INPUT) && large_input) {
+			if (large_input) {
 				/* Allocate a fake overused mbuf */
 				data = rte_malloc(NULL, seg->length, 0);
 				TEST_ASSERT_NOT_NULL(data,
@@ -962,7 +1087,7 @@ init_op_data_objs(struct rte_bbdev_op_data *bufs,
 					seg->length);
 				memcpy(data, seg->addr, seg->length);
 				m_head->buf_addr = data;
-				m_head->buf_iova = rte_malloc_virt2iova(data);
+				rte_mbuf_iova_set(m_head, rte_malloc_virt2iova(data));
 				m_head->data_off = 0;
 				m_head->data_len = seg->length;
 			} else {
@@ -1008,22 +1133,36 @@ init_op_data_objs(struct rte_bbdev_op_data *bufs,
 						op_type);
 			}
 		} else {
-
-			/* allocate chained-mbuf for output buffer */
-			for (j = 1; j < ref_entries->nb_segments; ++j) {
-				struct rte_mbuf *m_tail =
+			if (((op_type == DATA_HARD_OUTPUT) || (op_type == DATA_SOFT_OUTPUT))
+					&& ((seg->length + RTE_PKTMBUF_HEADROOM)
+					> RTE_BBDEV_LDPC_E_MAX_MBUF)) {
+				/* Allocate a fake overused mbuf + margin */
+				data = rte_malloc(NULL, seg->length + 1024, 0);
+				TEST_ASSERT_NOT_NULL(data,
+					"rte malloc failed with %u bytes",
+					seg->length + 1024);
+				m_head->buf_addr = data;
+				rte_mbuf_iova_set(m_head, rte_malloc_virt2iova(data));
+				m_head->data_off = 0;
+				m_head->data_len = seg->length;
+			} else {
+				/* allocate chained-mbuf for output buffer */
+				for (j = 1; j < ref_entries->nb_segments; ++j) {
+					struct rte_mbuf *m_tail =
 						rte_pktmbuf_alloc(mbuf_pool);
-				TEST_ASSERT_NOT_NULL(m_tail,
+					TEST_ASSERT_NOT_NULL(m_tail,
 						"Not enough mbufs in %d data type mbuf pool (needed %u, available %u)",
 						op_type,
 						n * ref_entries->nb_segments,
 						mbuf_pool->size);
 
-				ret = rte_pktmbuf_chain(m_head, m_tail);
-				TEST_ASSERT_SUCCESS(ret,
+					ret = rte_pktmbuf_chain(m_head, m_tail);
+					TEST_ASSERT_SUCCESS(ret,
 						"Couldn't chain mbufs from %d data type mbuf pool",
 						op_type);
+				}
 			}
+			bufs[i].length += seg->length;
 		}
 	}
 
@@ -1261,7 +1400,7 @@ copy_reference_dec_op(struct rte_bbdev_dec_op **ops, unsigned int n,
 	struct rte_bbdev_op_turbo_dec *turbo_dec = &ref_op->turbo_dec;
 
 	for (i = 0; i < n; ++i) {
-		if (turbo_dec->code_block_mode == 0) {
+		if (turbo_dec->code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK) {
 			ops[i]->turbo_dec.tb_params.ea =
 					turbo_dec->tb_params.ea;
 			ops[i]->turbo_dec.tb_params.eb =
@@ -1309,7 +1448,7 @@ copy_reference_enc_op(struct rte_bbdev_enc_op **ops, unsigned int n,
 	unsigned int i;
 	struct rte_bbdev_op_turbo_enc *turbo_enc = &ref_op->turbo_enc;
 	for (i = 0; i < n; ++i) {
-		if (turbo_enc->code_block_mode == 0) {
+		if (turbo_enc->code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK) {
 			ops[i]->turbo_enc.tb_params.ea =
 					turbo_enc->tb_params.ea;
 			ops[i]->turbo_enc.tb_params.eb =
@@ -1664,7 +1803,7 @@ copy_reference_ldpc_dec_op(struct rte_bbdev_dec_op **ops, unsigned int n,
 	struct rte_bbdev_op_ldpc_dec *ldpc_dec = &ref_op->ldpc_dec;
 
 	for (i = 0; i < n; ++i) {
-		if (ldpc_dec->code_block_mode == 0) {
+		if (ldpc_dec->code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK) {
 			ops[i]->ldpc_dec.tb_params.ea =
 					ldpc_dec->tb_params.ea;
 			ops[i]->ldpc_dec.tb_params.eb =
@@ -1718,7 +1857,7 @@ copy_reference_ldpc_enc_op(struct rte_bbdev_enc_op **ops, unsigned int n,
 	unsigned int i;
 	struct rte_bbdev_op_ldpc_enc *ldpc_enc = &ref_op->ldpc_enc;
 	for (i = 0; i < n; ++i) {
-		if (ldpc_enc->code_block_mode == 0) {
+		if (ldpc_enc->code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK) {
 			ops[i]->ldpc_enc.tb_params.ea = ldpc_enc->tb_params.ea;
 			ops[i]->ldpc_enc.tb_params.eb = ldpc_enc->tb_params.eb;
 			ops[i]->ldpc_enc.tb_params.cab =
@@ -1738,6 +1877,40 @@ copy_reference_ldpc_enc_op(struct rte_bbdev_enc_op **ops, unsigned int n,
 		ops[i]->ldpc_enc.code_block_mode = ldpc_enc->code_block_mode;
 		ops[i]->ldpc_enc.output = outputs[start_idx + i];
 		ops[i]->ldpc_enc.input = inputs[start_idx + i];
+	}
+}
+
+static void
+copy_reference_fft_op(struct rte_bbdev_fft_op **ops, unsigned int n,
+		unsigned int start_idx, struct rte_bbdev_op_data *inputs,
+		struct rte_bbdev_op_data *outputs, struct rte_bbdev_op_data *pwrouts,
+		struct rte_bbdev_fft_op *ref_op)
+{
+	unsigned int i, j;
+	struct rte_bbdev_op_fft *fft = &ref_op->fft;
+	for (i = 0; i < n; i++) {
+		ops[i]->fft.input_sequence_size = fft->input_sequence_size;
+		ops[i]->fft.input_leading_padding = fft->input_leading_padding;
+		ops[i]->fft.output_sequence_size = fft->output_sequence_size;
+		ops[i]->fft.output_leading_depadding =
+				fft->output_leading_depadding;
+		for (j = 0; j < RTE_BBDEV_MAX_CS_2; j++)
+			ops[i]->fft.window_index[j] = fft->window_index[j];
+		ops[i]->fft.cs_bitmap = fft->cs_bitmap;
+		ops[i]->fft.num_antennas_log2 = fft->num_antennas_log2;
+		ops[i]->fft.idft_log2 = fft->idft_log2;
+		ops[i]->fft.dft_log2 = fft->dft_log2;
+		ops[i]->fft.cs_time_adjustment = fft->cs_time_adjustment;
+		ops[i]->fft.idft_shift = fft->idft_shift;
+		ops[i]->fft.dft_shift = fft->dft_shift;
+		ops[i]->fft.ncs_reciprocal = fft->ncs_reciprocal;
+		ops[i]->fft.power_shift = fft->power_shift;
+		ops[i]->fft.fp16_exp_adjust = fft->fp16_exp_adjust;
+		ops[i]->fft.base_output = outputs[start_idx + i];
+		ops[i]->fft.base_input = inputs[start_idx + i];
+		if (pwrouts != NULL)
+			ops[i]->fft.power_meas_output = pwrouts[start_idx + i];
+		ops[i]->fft.op_flags = fft->op_flags;
 	}
 }
 
@@ -1779,10 +1952,24 @@ check_enc_status_and_ordering(struct rte_bbdev_enc_op *op,
 			"op_status (%d) != expected_status (%d)",
 			op->status, expected_status);
 
-	if (op->opaque_data != (void *)(uintptr_t)INVALID_OPAQUE)
-		TEST_ASSERT((void *)(uintptr_t)order_idx == op->opaque_data,
-				"Ordering error, expected %p, got %p",
-				(void *)(uintptr_t)order_idx, op->opaque_data);
+	TEST_ASSERT((void *)(uintptr_t)order_idx == op->opaque_data,
+			"Ordering error, expected %p, got %p",
+			(void *)(uintptr_t)order_idx, op->opaque_data);
+
+	return TEST_SUCCESS;
+}
+
+static int
+check_fft_status_and_ordering(struct rte_bbdev_fft_op *op,
+		unsigned int order_idx, const int expected_status)
+{
+	TEST_ASSERT(op->status == expected_status,
+			"op_status (%d) != expected_status (%d)",
+			op->status, expected_status);
+
+	TEST_ASSERT((void *)(uintptr_t)order_idx == op->opaque_data,
+			"Ordering error, expected %p, got %p",
+			(void *)(uintptr_t)order_idx, op->opaque_data);
 
 	return TEST_SUCCESS;
 }
@@ -1904,12 +2091,16 @@ validate_op_harq_chain(struct rte_bbdev_op_data *op,
 		uint16_t data_len = rte_pktmbuf_data_len(m) - offset;
 		total_data_size += orig_op->segments[i].length;
 
-		TEST_ASSERT(orig_op->segments[i].length <
-				(uint32_t)(data_len + 64),
+		TEST_ASSERT(orig_op->segments[i].length < (uint32_t)(data_len + HARQ_MEM_TOLERANCE),
 				"Length of segment differ in original (%u) and filled (%u) op",
 				orig_op->segments[i].length, data_len);
 		harq_orig = (int8_t *) orig_op->segments[i].addr;
 		harq_out = rte_pktmbuf_mtod_offset(m, int8_t *, offset);
+
+		/* Cannot compare HARQ output data for such cases */
+		if ((ldpc_llr_decimals > 1) && ((ops_ld->op_flags & RTE_BBDEV_LDPC_LLR_COMPRESSION)
+				|| (ops_ld->op_flags & RTE_BBDEV_LDPC_HARQ_6BIT_COMPRESSION)))
+			break;
 
 		if (!(ldpc_cap_flags &
 				RTE_BBDEV_LDPC_INTERNAL_HARQ_MEMORY_FILLERS
@@ -1925,9 +2116,9 @@ validate_op_harq_chain(struct rte_bbdev_op_data *op,
 					ops_ld->n_filler;
 			if (data_len > deRmOutSize)
 				data_len = deRmOutSize;
-			if (data_len > orig_op->segments[i].length)
-				data_len = orig_op->segments[i].length;
 		}
+		if (data_len > orig_op->segments[i].length)
+			data_len = orig_op->segments[i].length;
 		/*
 		 * HARQ output can have minor differences
 		 * due to integer representation and related scaling
@@ -1986,9 +2177,60 @@ validate_op_harq_chain(struct rte_bbdev_op_data *op,
 
 	/* Validate total mbuf pkt length */
 	uint32_t pkt_len = rte_pktmbuf_pkt_len(op->data) - op->offset;
-	TEST_ASSERT(total_data_size < pkt_len + 64,
+	TEST_ASSERT(total_data_size < pkt_len + HARQ_MEM_TOLERANCE,
 			"Length of data differ in original (%u) and filled (%u) op",
 			total_data_size, pkt_len);
+
+	return TEST_SUCCESS;
+}
+
+
+static inline int
+validate_op_so_chain(struct rte_bbdev_op_data *op,
+		struct op_data_entries *orig_op)
+{
+	struct rte_mbuf *m = op->data;
+	uint8_t i, nb_dst_segments = orig_op->nb_segments;
+	uint32_t j, jj;
+	int8_t *so_orig, *so_out;
+	uint32_t byte_error = 0, error, margin_error = 0;
+
+	TEST_ASSERT(nb_dst_segments == m->nb_segs,
+			"Number of segments differ in original (%u) and filled (%u) op",
+			nb_dst_segments, m->nb_segs);
+
+	/* Validate each mbuf segment length. */
+	for (i = 0; i < nb_dst_segments; ++i) {
+		/* Apply offset to the first mbuf segment. */
+		uint16_t offset = (i == 0) ? op->offset : 0;
+		uint16_t data_len = rte_pktmbuf_data_len(m) - offset;
+
+		TEST_ASSERT(orig_op->segments[i].length == data_len,
+				"Length of segment differ in original (%u) and filled (%u) op",
+				orig_op->segments[i].length, data_len);
+		so_orig = (int8_t *) orig_op->segments[i].addr;
+		so_out = rte_pktmbuf_mtod_offset(m, int8_t *, offset);
+		margin_error += data_len / 8; /* Allow for few % errors. */
+
+		/* SO output can have minor differences due to algorithm variations. */
+		for (j = 0, jj = 0; j < data_len; j++, jj++) {
+			if (so_orig[j] != so_out[jj]) {
+				error = (so_orig[j] > so_out[jj]) ? so_orig[j] - so_out[jj] :
+						so_out[jj] - so_orig[j];
+				/* Residual quantization error. */
+				if (error > 32) {
+					printf("Warning: Soft mismatch %d: exp %d act %d => %d\n",
+							j, so_orig[j], so_out[jj], error);
+					byte_error++;
+				}
+			}
+		}
+		m = m->next;
+	}
+
+	if (byte_error > margin_error)
+		TEST_ASSERT(byte_error <= 1, "Soft output mismatch (%d) %d",
+				byte_error, margin_error);
 
 	return TEST_SUCCESS;
 }
@@ -2027,7 +2269,7 @@ validate_dec_op(struct rte_bbdev_dec_op **ops, const uint16_t n,
 				i);
 
 		if (ref_op->turbo_dec.op_flags & RTE_BBDEV_TURBO_SOFT_OUTPUT)
-			TEST_ASSERT_SUCCESS(validate_op_chain(soft_output,
+			TEST_ASSERT_SUCCESS(validate_op_so_chain(soft_output,
 					soft_data_orig),
 					"Soft output buffers (CB=%u) are not equal",
 					i);
@@ -2176,6 +2418,76 @@ validate_ldpc_enc_op(struct rte_bbdev_enc_op **ops, const uint16_t n,
 	return TEST_SUCCESS;
 }
 
+
+static inline int
+validate_op_fft_chain(struct rte_bbdev_op_data *op, struct op_data_entries *orig_op)
+{
+	struct rte_mbuf *m = op->data;
+	uint8_t i, nb_dst_segments = orig_op->nb_segments;
+	int16_t delt, abs_delt, thres_hold = 3;
+	uint32_t j, data_len_iq, error_num;
+	int16_t *ref_out, *op_out;
+
+	TEST_ASSERT(nb_dst_segments == m->nb_segs,
+			"Number of segments differ in original (%u) and filled (%u) op fft",
+			nb_dst_segments, m->nb_segs);
+
+	/* Due to size limitation of mbuf, FFT doesn't use real mbuf. */
+	for (i = 0; i < nb_dst_segments; ++i) {
+		uint16_t offset = (i == 0) ? op->offset : 0;
+		uint32_t data_len = op->length;
+
+		TEST_ASSERT(orig_op->segments[i].length == data_len,
+				"Length of segment differ in original (%u) and filled (%u) op fft",
+				orig_op->segments[i].length, data_len);
+		/* Divided by 2 to get the number of 16bits data. */
+		data_len_iq = data_len >> 1;
+		ref_out = (int16_t *)(orig_op->segments[i].addr);
+		op_out = rte_pktmbuf_mtod_offset(m, int16_t *, offset);
+		error_num = 0;
+		for (j = 0; j < data_len_iq; j++) {
+			delt = ref_out[j] - op_out[j];
+			abs_delt = delt > 0 ? delt : -delt;
+			error_num += (abs_delt > thres_hold ? 1 : 0);
+		}
+		if (error_num > 0) {
+			rte_memdump(stdout, "Buffer A", ref_out, data_len);
+			rte_memdump(stdout, "Buffer B", op_out, data_len);
+			TEST_ASSERT(error_num == 0,
+				"FFT Output are not matched total (%u) errors (%u)",
+				data_len_iq, error_num);
+		}
+
+		m = m->next;
+	}
+
+	return TEST_SUCCESS;
+}
+
+static int
+validate_fft_op(struct rte_bbdev_fft_op **ops, const uint16_t n,
+		struct rte_bbdev_fft_op *ref_op)
+{
+	unsigned int i;
+	int ret;
+	struct op_data_entries *fft_data_orig = &test_vector.entries[DATA_HARD_OUTPUT];
+	struct op_data_entries *fft_pwr_orig = &test_vector.entries[DATA_SOFT_OUTPUT];
+
+	for (i = 0; i < n; ++i) {
+		ret = check_fft_status_and_ordering(ops[i], i, ref_op->status);
+		TEST_ASSERT_SUCCESS(ret, "Checking status and ordering for FFT failed");
+		TEST_ASSERT_SUCCESS(validate_op_fft_chain(
+				&ops[i]->fft.base_output, fft_data_orig),
+				"FFT Output buffers (op=%u) are not matched", i);
+		if (check_bit(ops[i]->fft.op_flags, RTE_BBDEV_FFT_POWER_MEAS))
+			TEST_ASSERT_SUCCESS(validate_op_fft_chain(
+				&ops[i]->fft.power_meas_output, fft_pwr_orig),
+				"FFT Power Output buffers (op=%u) are not matched", i);
+	}
+
+	return TEST_SUCCESS;
+}
+
 static void
 create_reference_dec_op(struct rte_bbdev_dec_op *op)
 {
@@ -2209,6 +2521,16 @@ create_reference_ldpc_dec_op(struct rte_bbdev_dec_op *op)
 	}
 }
 
+static void
+create_reference_fft_op(struct rte_bbdev_fft_op *op)
+{
+	unsigned int i;
+	struct op_data_entries *entry;
+	op->fft = test_vector.fft;
+	entry = &test_vector.entries[DATA_INPUT];
+	for (i = 0; i < entry->nb_segments; ++i)
+		op->fft.base_input.length += entry->segments[i].length;
+}
 
 static void
 create_reference_enc_op(struct rte_bbdev_enc_op *op)
@@ -2242,7 +2564,7 @@ calc_dec_TB_size(struct rte_bbdev_dec_op *op)
 	uint8_t i;
 	uint32_t c, r, tb_size = 0;
 
-	if (op->turbo_dec.code_block_mode) {
+	if (op->turbo_dec.code_block_mode == RTE_BBDEV_CODE_BLOCK) {
 		tb_size = op->turbo_dec.tb_params.k_neg;
 	} else {
 		c = op->turbo_dec.tb_params.c;
@@ -2262,7 +2584,7 @@ calc_ldpc_dec_TB_size(struct rte_bbdev_dec_op *op)
 	uint32_t c, r, tb_size = 0;
 	uint16_t sys_cols = (op->ldpc_dec.basegraph == 1) ? 22 : 10;
 
-	if (op->ldpc_dec.code_block_mode) {
+	if (op->ldpc_dec.code_block_mode == RTE_BBDEV_CODE_BLOCK) {
 		tb_size = sys_cols * op->ldpc_dec.z_c - op->ldpc_dec.n_filler;
 	} else {
 		c = op->ldpc_dec.tb_params.c;
@@ -2280,7 +2602,7 @@ calc_enc_TB_size(struct rte_bbdev_enc_op *op)
 	uint8_t i;
 	uint32_t c, r, tb_size = 0;
 
-	if (op->turbo_enc.code_block_mode) {
+	if (op->turbo_enc.code_block_mode == RTE_BBDEV_CODE_BLOCK) {
 		tb_size = op->turbo_enc.tb_params.k_neg;
 	} else {
 		c = op->turbo_enc.tb_params.c;
@@ -2300,7 +2622,7 @@ calc_ldpc_enc_TB_size(struct rte_bbdev_enc_op *op)
 	uint32_t c, r, tb_size = 0;
 	uint16_t sys_cols = (op->ldpc_enc.basegraph == 1) ? 22 : 10;
 
-	if (op->turbo_enc.code_block_mode) {
+	if (op->ldpc_enc.code_block_mode == RTE_BBDEV_CODE_BLOCK) {
 		tb_size = sys_cols * op->ldpc_enc.z_c - op->ldpc_enc.n_filler;
 	} else {
 		c = op->turbo_enc.tb_params.c;
@@ -2312,6 +2634,17 @@ calc_ldpc_enc_TB_size(struct rte_bbdev_enc_op *op)
 	return tb_size;
 }
 
+static uint32_t
+calc_fft_size(struct rte_bbdev_fft_op *op)
+{
+	uint32_t output_size;
+	int num_cs = 0, i;
+	for (i = 0; i < 12; i++)
+		if (check_bit(op->fft.cs_bitmap, 1 << i))
+			num_cs++;
+	output_size = (num_cs * op->fft.output_sequence_size * 4) << op->fft.num_antennas_log2;
+	return output_size;
+}
 
 static int
 init_test_op_params(struct test_op_params *op_params,
@@ -2324,6 +2657,9 @@ init_test_op_params(struct test_op_params *op_params,
 			op_type == RTE_BBDEV_OP_LDPC_DEC)
 		ret = rte_bbdev_dec_op_alloc_bulk(ops_mp,
 				&op_params->ref_dec_op, 1);
+	else if (op_type == RTE_BBDEV_OP_FFT)
+		ret = rte_bbdev_fft_op_alloc_bulk(ops_mp,
+				&op_params->ref_fft_op, 1);
 	else
 		ret = rte_bbdev_enc_op_alloc_bulk(ops_mp,
 				&op_params->ref_enc_op, 1);
@@ -2341,6 +2677,8 @@ init_test_op_params(struct test_op_params *op_params,
 	else if (op_type == RTE_BBDEV_OP_TURBO_ENC
 			|| op_type == RTE_BBDEV_OP_LDPC_ENC)
 		op_params->ref_enc_op->status = expected_status;
+	else if (op_type == RTE_BBDEV_OP_FFT)
+		op_params->ref_fft_op->status = expected_status;
 	return 0;
 }
 
@@ -2389,13 +2727,13 @@ run_test_case_on_device(test_case_function *test_case_func, uint8_t dev_id,
 
 	/* Find capabilities */
 	const struct rte_bbdev_op_cap *cap = info.drv.capabilities;
-	for (i = 0; i < RTE_BBDEV_OP_TYPE_COUNT; i++) {
+	do {
 		if (cap->type == test_vector.op_type) {
 			capabilities = cap;
 			break;
 		}
 		cap++;
-	}
+	} while (cap->type != RTE_BBDEV_OP_NONE);
 	TEST_ASSERT_NOT_NULL(capabilities,
 			"Couldn't find capabilities");
 
@@ -2407,6 +2745,8 @@ run_test_case_on_device(test_case_function *test_case_func, uint8_t dev_id,
 		create_reference_ldpc_enc_op(op_params->ref_enc_op);
 	else if (test_vector.op_type == RTE_BBDEV_OP_LDPC_DEC)
 		create_reference_ldpc_dec_op(op_params->ref_dec_op);
+	else if (test_vector.op_type == RTE_BBDEV_OP_FFT)
+		create_reference_fft_op(op_params->ref_fft_op);
 
 	for (i = 0; i < ad->nb_queues; ++i) {
 		f_ret = fill_queue_buffers(op_params,
@@ -2594,46 +2934,51 @@ dequeue_event_callback(uint16_t dev_id,
 	}
 
 	if (unlikely(event != RTE_BBDEV_EVENT_DEQUEUE)) {
-		rte_atomic16_set(&tp->processing_status, TEST_FAILED);
+		__atomic_store_n(&tp->processing_status, TEST_FAILED, __ATOMIC_RELAXED);
 		printf(
 			"Dequeue interrupt handler called for incorrect event!\n");
 		return;
 	}
 
-	burst_sz = rte_atomic16_read(&tp->burst_sz);
+	burst_sz = __atomic_load_n(&tp->burst_sz, __ATOMIC_RELAXED);
 	num_ops = tp->op_params->num_to_process;
 
 	if (test_vector.op_type == RTE_BBDEV_OP_TURBO_DEC)
 		deq = rte_bbdev_dequeue_dec_ops(dev_id, queue_id,
 				&tp->dec_ops[
-					rte_atomic16_read(&tp->nb_dequeued)],
+					__atomic_load_n(&tp->nb_dequeued, __ATOMIC_RELAXED)],
 				burst_sz);
 	else if (test_vector.op_type == RTE_BBDEV_OP_LDPC_DEC)
 		deq = rte_bbdev_dequeue_ldpc_dec_ops(dev_id, queue_id,
 				&tp->dec_ops[
-					rte_atomic16_read(&tp->nb_dequeued)],
+					__atomic_load_n(&tp->nb_dequeued, __ATOMIC_RELAXED)],
 				burst_sz);
 	else if (test_vector.op_type == RTE_BBDEV_OP_LDPC_ENC)
 		deq = rte_bbdev_dequeue_ldpc_enc_ops(dev_id, queue_id,
 				&tp->enc_ops[
-					rte_atomic16_read(&tp->nb_dequeued)],
+					__atomic_load_n(&tp->nb_dequeued, __ATOMIC_RELAXED)],
+				burst_sz);
+	else if (test_vector.op_type == RTE_BBDEV_OP_FFT)
+		deq = rte_bbdev_dequeue_fft_ops(dev_id, queue_id,
+				&tp->fft_ops[
+					__atomic_load_n(&tp->nb_dequeued, __ATOMIC_RELAXED)],
 				burst_sz);
 	else /*RTE_BBDEV_OP_TURBO_ENC*/
 		deq = rte_bbdev_dequeue_enc_ops(dev_id, queue_id,
 				&tp->enc_ops[
-					rte_atomic16_read(&tp->nb_dequeued)],
+					__atomic_load_n(&tp->nb_dequeued, __ATOMIC_RELAXED)],
 				burst_sz);
 
 	if (deq < burst_sz) {
 		printf(
 			"After receiving the interrupt all operations should be dequeued. Expected: %u, got: %u\n",
 			burst_sz, deq);
-		rte_atomic16_set(&tp->processing_status, TEST_FAILED);
+		__atomic_store_n(&tp->processing_status, TEST_FAILED, __ATOMIC_RELAXED);
 		return;
 	}
 
-	if (rte_atomic16_read(&tp->nb_dequeued) + deq < num_ops) {
-		rte_atomic16_add(&tp->nb_dequeued, deq);
+	if (__atomic_load_n(&tp->nb_dequeued, __ATOMIC_RELAXED) + deq < num_ops) {
+		__atomic_fetch_add(&tp->nb_dequeued, deq, __ATOMIC_RELAXED);
 		return;
 	}
 
@@ -2661,6 +3006,10 @@ dequeue_event_callback(uint16_t dev_id,
 		struct rte_bbdev_enc_op *ref_op = tp->op_params->ref_enc_op;
 		ret = validate_ldpc_enc_op(tp->enc_ops, num_ops, ref_op);
 		rte_bbdev_enc_op_free_bulk(tp->enc_ops, deq);
+	} else if (test_vector.op_type == RTE_BBDEV_OP_FFT) {
+		struct rte_bbdev_fft_op *ref_op = tp->op_params->ref_fft_op;
+		ret = validate_fft_op(tp->fft_ops, num_ops, ref_op);
+		rte_bbdev_fft_op_free_bulk(tp->fft_ops, deq);
 	} else if (test_vector.op_type == RTE_BBDEV_OP_LDPC_DEC) {
 		struct rte_bbdev_dec_op *ref_op = tp->op_params->ref_dec_op;
 		ret = validate_ldpc_dec_op(tp->dec_ops, num_ops, ref_op,
@@ -2670,7 +3019,7 @@ dequeue_event_callback(uint16_t dev_id,
 
 	if (ret) {
 		printf("Buffers validation failed\n");
-		rte_atomic16_set(&tp->processing_status, TEST_FAILED);
+		__atomic_store_n(&tp->processing_status, TEST_FAILED, __ATOMIC_RELAXED);
 	}
 
 	switch (test_vector.op_type) {
@@ -2683,6 +3032,9 @@ dequeue_event_callback(uint16_t dev_id,
 	case RTE_BBDEV_OP_LDPC_DEC:
 		tb_len_bits = calc_ldpc_dec_TB_size(tp->op_params->ref_dec_op);
 		break;
+	case RTE_BBDEV_OP_FFT:
+		tb_len_bits = calc_fft_size(tp->op_params->ref_fft_op);
+		break;
 	case RTE_BBDEV_OP_LDPC_ENC:
 		tb_len_bits = calc_ldpc_enc_TB_size(tp->op_params->ref_enc_op);
 		break;
@@ -2691,7 +3043,7 @@ dequeue_event_callback(uint16_t dev_id,
 		break;
 	default:
 		printf("Unknown op type: %d\n", test_vector.op_type);
-		rte_atomic16_set(&tp->processing_status, TEST_FAILED);
+		__atomic_store_n(&tp->processing_status, TEST_FAILED, __ATOMIC_RELAXED);
 		return;
 	}
 
@@ -2700,7 +3052,7 @@ dequeue_event_callback(uint16_t dev_id,
 	tp->mbps += (((double)(num_ops * tb_len_bits)) / 1000000.0) /
 			((double)total_time / (double)rte_get_tsc_hz());
 
-	rte_atomic16_add(&tp->nb_dequeued, deq);
+	__atomic_fetch_add(&tp->nb_dequeued, deq, __ATOMIC_RELAXED);
 }
 
 static int
@@ -2738,11 +3090,10 @@ throughput_intr_lcore_ldpc_dec(void *arg)
 
 	bufs = &tp->op_params->q_bufs[GET_SOCKET(info.socket_id)][queue_id];
 
-	rte_atomic16_clear(&tp->processing_status);
-	rte_atomic16_clear(&tp->nb_dequeued);
+	__atomic_store_n(&tp->processing_status, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&tp->nb_dequeued, 0, __ATOMIC_RELAXED);
 
-	while (rte_atomic16_read(&tp->op_params->sync) == SYNC_WAIT)
-		rte_pause();
+	rte_wait_until_equal_16(&tp->op_params->sync, SYNC_START, __ATOMIC_RELAXED);
 
 	ret = rte_bbdev_dec_op_alloc_bulk(tp->op_params->mp, ops,
 				num_to_process);
@@ -2774,6 +3125,15 @@ throughput_intr_lcore_ldpc_dec(void *arg)
 			if (unlikely(num_to_process - enqueued < num_to_enq))
 				num_to_enq = num_to_process - enqueued;
 
+			/* Write to thread burst_sz current number of enqueued
+			 * descriptors. It ensures that proper number of
+			 * descriptors will be dequeued in callback
+			 * function - needed for last batch in case where
+			 * the number of operations is not a multiple of
+			 * burst size.
+			 */
+			__atomic_store_n(&tp->burst_sz, num_to_enq, __ATOMIC_RELAXED);
+
 			enq = 0;
 			do {
 				enq += rte_bbdev_enqueue_ldpc_dec_ops(
@@ -2783,24 +3143,13 @@ throughput_intr_lcore_ldpc_dec(void *arg)
 			} while (unlikely(num_to_enq != enq));
 			enqueued += enq;
 
-			/* Write to thread burst_sz current number of enqueued
-			 * descriptors. It ensures that proper number of
-			 * descriptors will be dequeued in callback
-			 * function - needed for last batch in case where
-			 * the number of operations is not a multiple of
-			 * burst size.
-			 */
-			rte_atomic16_set(&tp->burst_sz, num_to_enq);
-
 			/* Wait until processing of previous batch is
 			 * completed
 			 */
-			while (rte_atomic16_read(&tp->nb_dequeued) !=
-					(int16_t) enqueued)
-				rte_pause();
+			rte_wait_until_equal_16(&tp->nb_dequeued, enqueued, __ATOMIC_RELAXED);
 		}
 		if (j != TEST_REPETITIONS - 1)
-			rte_atomic16_clear(&tp->nb_dequeued);
+			__atomic_store_n(&tp->nb_dequeued, 0, __ATOMIC_RELAXED);
 	}
 
 	return TEST_SUCCESS;
@@ -2817,6 +3166,7 @@ throughput_intr_lcore_dec(void *arg)
 	struct rte_bbdev_dec_op *ops[num_to_process];
 	struct test_buffers *bufs = NULL;
 	struct rte_bbdev_info info;
+	struct rte_bbdev_dec_op *ref_op = tp->op_params->ref_dec_op;
 	int ret, i, j;
 	uint16_t num_to_enq, enq;
 
@@ -2835,28 +3185,31 @@ throughput_intr_lcore_dec(void *arg)
 
 	bufs = &tp->op_params->q_bufs[GET_SOCKET(info.socket_id)][queue_id];
 
-	rte_atomic16_clear(&tp->processing_status);
-	rte_atomic16_clear(&tp->nb_dequeued);
+	__atomic_store_n(&tp->processing_status, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&tp->nb_dequeued, 0, __ATOMIC_RELAXED);
 
-	while (rte_atomic16_read(&tp->op_params->sync) == SYNC_WAIT)
-		rte_pause();
+	rte_wait_until_equal_16(&tp->op_params->sync, SYNC_START, __ATOMIC_RELAXED);
 
 	ret = rte_bbdev_dec_op_alloc_bulk(tp->op_params->mp, ops,
 				num_to_process);
-	TEST_ASSERT_SUCCESS(ret, "Allocation failed for %d ops",
-			num_to_process);
+	TEST_ASSERT_SUCCESS(ret, "Allocation failed for %d ops", num_to_process);
+	ref_op->turbo_dec.iter_max = get_iter_max();
 	if (test_vector.op_type != RTE_BBDEV_OP_NONE)
 		copy_reference_dec_op(ops, num_to_process, 0, bufs->inputs,
 				bufs->hard_outputs, bufs->soft_outputs,
 				tp->op_params->ref_dec_op);
 
-	/* Set counter to validate the ordering */
+	/* Set counter to validate the ordering. */
 	for (j = 0; j < num_to_process; ++j)
 		ops[j]->opaque_data = (void *)(uintptr_t)j;
 
 	for (j = 0; j < TEST_REPETITIONS; ++j) {
-		for (i = 0; i < num_to_process; ++i)
+		for (i = 0; i < num_to_process; ++i) {
 			rte_pktmbuf_reset(ops[i]->turbo_dec.hard_output.data);
+			if (ops[i]->turbo_dec.soft_output.data != NULL)
+				rte_pktmbuf_reset(ops[i]->turbo_dec.soft_output.data);
+		}
+
 
 		tp->start_time = rte_rdtsc_precise();
 		for (enqueued = 0; enqueued < num_to_process;) {
@@ -2864,6 +3217,15 @@ throughput_intr_lcore_dec(void *arg)
 
 			if (unlikely(num_to_process - enqueued < num_to_enq))
 				num_to_enq = num_to_process - enqueued;
+
+			/* Write to thread burst_sz current number of enqueued
+			 * descriptors. It ensures that proper number of
+			 * descriptors will be dequeued in callback
+			 * function - needed for last batch in case where
+			 * the number of operations is not a multiple of
+			 * burst size.
+			 */
+			__atomic_store_n(&tp->burst_sz, num_to_enq, __ATOMIC_RELAXED);
 
 			enq = 0;
 			do {
@@ -2873,24 +3235,13 @@ throughput_intr_lcore_dec(void *arg)
 			} while (unlikely(num_to_enq != enq));
 			enqueued += enq;
 
-			/* Write to thread burst_sz current number of enqueued
-			 * descriptors. It ensures that proper number of
-			 * descriptors will be dequeued in callback
-			 * function - needed for last batch in case where
-			 * the number of operations is not a multiple of
-			 * burst size.
-			 */
-			rte_atomic16_set(&tp->burst_sz, num_to_enq);
-
 			/* Wait until processing of previous batch is
 			 * completed
 			 */
-			while (rte_atomic16_read(&tp->nb_dequeued) !=
-					(int16_t) enqueued)
-				rte_pause();
+			rte_wait_until_equal_16(&tp->nb_dequeued, enqueued, __ATOMIC_RELAXED);
 		}
 		if (j != TEST_REPETITIONS - 1)
-			rte_atomic16_clear(&tp->nb_dequeued);
+			__atomic_store_n(&tp->nb_dequeued, 0, __ATOMIC_RELAXED);
 	}
 
 	return TEST_SUCCESS;
@@ -2925,11 +3276,10 @@ throughput_intr_lcore_enc(void *arg)
 
 	bufs = &tp->op_params->q_bufs[GET_SOCKET(info.socket_id)][queue_id];
 
-	rte_atomic16_clear(&tp->processing_status);
-	rte_atomic16_clear(&tp->nb_dequeued);
+	__atomic_store_n(&tp->processing_status, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&tp->nb_dequeued, 0, __ATOMIC_RELAXED);
 
-	while (rte_atomic16_read(&tp->op_params->sync) == SYNC_WAIT)
-		rte_pause();
+	rte_wait_until_equal_16(&tp->op_params->sync, SYNC_START, __ATOMIC_RELAXED);
 
 	ret = rte_bbdev_enc_op_alloc_bulk(tp->op_params->mp, ops,
 			num_to_process);
@@ -2954,6 +3304,15 @@ throughput_intr_lcore_enc(void *arg)
 			if (unlikely(num_to_process - enqueued < num_to_enq))
 				num_to_enq = num_to_process - enqueued;
 
+			/* Write to thread burst_sz current number of enqueued
+			 * descriptors. It ensures that proper number of
+			 * descriptors will be dequeued in callback
+			 * function - needed for last batch in case where
+			 * the number of operations is not a multiple of
+			 * burst size.
+			 */
+			__atomic_store_n(&tp->burst_sz, num_to_enq, __ATOMIC_RELAXED);
+
 			enq = 0;
 			do {
 				enq += rte_bbdev_enqueue_enc_ops(tp->dev_id,
@@ -2962,24 +3321,13 @@ throughput_intr_lcore_enc(void *arg)
 			} while (unlikely(enq != num_to_enq));
 			enqueued += enq;
 
-			/* Write to thread burst_sz current number of enqueued
-			 * descriptors. It ensures that proper number of
-			 * descriptors will be dequeued in callback
-			 * function - needed for last batch in case where
-			 * the number of operations is not a multiple of
-			 * burst size.
-			 */
-			rte_atomic16_set(&tp->burst_sz, num_to_enq);
-
 			/* Wait until processing of previous batch is
 			 * completed
 			 */
-			while (rte_atomic16_read(&tp->nb_dequeued) !=
-					(int16_t) enqueued)
-				rte_pause();
+			rte_wait_until_equal_16(&tp->nb_dequeued, enqueued, __ATOMIC_RELAXED);
 		}
 		if (j != TEST_REPETITIONS - 1)
-			rte_atomic16_clear(&tp->nb_dequeued);
+			__atomic_store_n(&tp->nb_dequeued, 0, __ATOMIC_RELAXED);
 	}
 
 	return TEST_SUCCESS;
@@ -3015,11 +3363,10 @@ throughput_intr_lcore_ldpc_enc(void *arg)
 
 	bufs = &tp->op_params->q_bufs[GET_SOCKET(info.socket_id)][queue_id];
 
-	rte_atomic16_clear(&tp->processing_status);
-	rte_atomic16_clear(&tp->nb_dequeued);
+	__atomic_store_n(&tp->processing_status, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&tp->nb_dequeued, 0, __ATOMIC_RELAXED);
 
-	while (rte_atomic16_read(&tp->op_params->sync) == SYNC_WAIT)
-		rte_pause();
+	rte_wait_until_equal_16(&tp->op_params->sync, SYNC_START, __ATOMIC_RELAXED);
 
 	ret = rte_bbdev_enc_op_alloc_bulk(tp->op_params->mp, ops,
 			num_to_process);
@@ -3045,6 +3392,15 @@ throughput_intr_lcore_ldpc_enc(void *arg)
 			if (unlikely(num_to_process - enqueued < num_to_enq))
 				num_to_enq = num_to_process - enqueued;
 
+			/* Write to thread burst_sz current number of enqueued
+			 * descriptors. It ensures that proper number of
+			 * descriptors will be dequeued in callback
+			 * function - needed for last batch in case where
+			 * the number of operations is not a multiple of
+			 * burst size.
+			 */
+			__atomic_store_n(&tp->burst_sz, num_to_enq, __ATOMIC_RELAXED);
+
 			enq = 0;
 			do {
 				enq += rte_bbdev_enqueue_ldpc_enc_ops(
@@ -3054,6 +3410,76 @@ throughput_intr_lcore_ldpc_enc(void *arg)
 			} while (unlikely(enq != num_to_enq));
 			enqueued += enq;
 
+			/* Wait until processing of previous batch is
+			 * completed
+			 */
+			rte_wait_until_equal_16(&tp->nb_dequeued, enqueued, __ATOMIC_RELAXED);
+		}
+		if (j != TEST_REPETITIONS - 1)
+			__atomic_store_n(&tp->nb_dequeued, 0, __ATOMIC_RELAXED);
+	}
+
+	return TEST_SUCCESS;
+}
+
+
+static int
+throughput_intr_lcore_fft(void *arg)
+{
+	struct thread_params *tp = arg;
+	unsigned int enqueued;
+	const uint16_t queue_id = tp->queue_id;
+	const uint16_t burst_sz = tp->op_params->burst_sz;
+	const uint16_t num_to_process = tp->op_params->num_to_process;
+	struct rte_bbdev_fft_op *ops[num_to_process];
+	struct test_buffers *bufs = NULL;
+	struct rte_bbdev_info info;
+	int ret, i, j;
+	uint16_t num_to_enq, enq;
+
+	TEST_ASSERT_SUCCESS((burst_sz > MAX_BURST),
+			"BURST_SIZE should be <= %u", MAX_BURST);
+
+	TEST_ASSERT_SUCCESS(rte_bbdev_queue_intr_enable(tp->dev_id, queue_id),
+			"Failed to enable interrupts for dev: %u, queue_id: %u",
+			tp->dev_id, queue_id);
+
+	rte_bbdev_info_get(tp->dev_id, &info);
+
+	TEST_ASSERT_SUCCESS((num_to_process > info.drv.queue_size_lim),
+			"NUM_OPS cannot exceed %u for this device",
+			info.drv.queue_size_lim);
+
+	bufs = &tp->op_params->q_bufs[GET_SOCKET(info.socket_id)][queue_id];
+
+	__atomic_store_n(&tp->processing_status, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&tp->nb_dequeued, 0, __ATOMIC_RELAXED);
+
+	rte_wait_until_equal_16(&tp->op_params->sync, SYNC_START, __ATOMIC_RELAXED);
+
+	ret = rte_bbdev_fft_op_alloc_bulk(tp->op_params->mp, ops,
+			num_to_process);
+	TEST_ASSERT_SUCCESS(ret, "Allocation failed for %d ops",
+			num_to_process);
+	if (test_vector.op_type != RTE_BBDEV_OP_NONE)
+		copy_reference_fft_op(ops, num_to_process, 0, bufs->inputs,
+				bufs->hard_outputs, bufs->soft_outputs, tp->op_params->ref_fft_op);
+
+	/* Set counter to validate the ordering */
+	for (j = 0; j < num_to_process; ++j)
+		ops[j]->opaque_data = (void *)(uintptr_t)j;
+
+	for (j = 0; j < TEST_REPETITIONS; ++j) {
+		for (i = 0; i < num_to_process; ++i)
+			rte_pktmbuf_reset(ops[i]->fft.base_output.data);
+
+		tp->start_time = rte_rdtsc_precise();
+		for (enqueued = 0; enqueued < num_to_process;) {
+			num_to_enq = burst_sz;
+
+			if (unlikely(num_to_process - enqueued < num_to_enq))
+				num_to_enq = num_to_process - enqueued;
+
 			/* Write to thread burst_sz current number of enqueued
 			 * descriptors. It ensures that proper number of
 			 * descriptors will be dequeued in callback
@@ -3061,17 +3487,23 @@ throughput_intr_lcore_ldpc_enc(void *arg)
 			 * the number of operations is not a multiple of
 			 * burst size.
 			 */
-			rte_atomic16_set(&tp->burst_sz, num_to_enq);
+			__atomic_store_n(&tp->burst_sz, num_to_enq, __ATOMIC_RELAXED);
+
+			enq = 0;
+			do {
+				enq += rte_bbdev_enqueue_fft_ops(tp->dev_id,
+						queue_id, &ops[enqueued],
+						num_to_enq);
+			} while (unlikely(enq != num_to_enq));
+			enqueued += enq;
 
 			/* Wait until processing of previous batch is
 			 * completed
 			 */
-			while (rte_atomic16_read(&tp->nb_dequeued) !=
-					(int16_t) enqueued)
-				rte_pause();
+			rte_wait_until_equal_16(&tp->nb_dequeued, enqueued, __ATOMIC_RELAXED);
 		}
 		if (j != TEST_REPETITIONS - 1)
-			rte_atomic16_clear(&tp->nb_dequeued);
+			__atomic_store_n(&tp->nb_dequeued, 0, __ATOMIC_RELAXED);
 	}
 
 	return TEST_SUCCESS;
@@ -3093,6 +3525,7 @@ throughput_pmd_lcore_dec(void *arg)
 	int i, j, ret;
 	struct rte_bbdev_info info;
 	uint16_t num_to_enq;
+	bool so_enable;
 
 	TEST_ASSERT_SUCCESS((burst_sz > MAX_BURST),
 			"BURST_SIZE should be <= %u", MAX_BURST);
@@ -3105,15 +3538,16 @@ throughput_pmd_lcore_dec(void *arg)
 
 	bufs = &tp->op_params->q_bufs[GET_SOCKET(info.socket_id)][queue_id];
 
-	while (rte_atomic16_read(&tp->op_params->sync) == SYNC_WAIT)
-		rte_pause();
+	rte_wait_until_equal_16(&tp->op_params->sync, SYNC_START, __ATOMIC_RELAXED);
 
 	ret = rte_bbdev_dec_op_alloc_bulk(tp->op_params->mp, ops_enq, num_ops);
 	TEST_ASSERT_SUCCESS(ret, "Allocation failed for %d ops", num_ops);
-
+	ref_op->turbo_dec.iter_max = get_iter_max();
 	if (test_vector.op_type != RTE_BBDEV_OP_NONE)
 		copy_reference_dec_op(ops_enq, num_ops, 0, bufs->inputs,
 				bufs->hard_outputs, bufs->soft_outputs, ref_op);
+
+	so_enable = check_bit(ops_enq[0]->turbo_dec.op_flags, RTE_BBDEV_TURBO_SOFT_OUTPUT);
 
 	/* Set counter to validate the ordering */
 	for (j = 0; j < num_ops; ++j)
@@ -3123,6 +3557,9 @@ throughput_pmd_lcore_dec(void *arg)
 
 		for (j = 0; j < num_ops; ++j)
 			mbuf_reset(ops_enq[j]->turbo_dec.hard_output.data);
+		if (so_enable)
+			for (j = 0; j < num_ops; ++j)
+				mbuf_reset(ops_enq[j]->turbo_dec.soft_output.data);
 
 		start_time = rte_rdtsc_precise();
 
@@ -3209,8 +3646,7 @@ bler_pmd_lcore_ldpc_dec(void *arg)
 
 	bufs = &tp->op_params->q_bufs[GET_SOCKET(info.socket_id)][queue_id];
 
-	while (rte_atomic16_read(&tp->op_params->sync) == SYNC_WAIT)
-		rte_pause();
+	rte_wait_until_equal_16(&tp->op_params->sync, SYNC_START, __ATOMIC_RELAXED);
 
 	ret = rte_bbdev_dec_op_alloc_bulk(tp->op_params->mp, ops_enq, num_ops);
 	TEST_ASSERT_SUCCESS(ret, "Allocation failed for %d ops", num_ops);
@@ -3239,8 +3675,7 @@ bler_pmd_lcore_ldpc_dec(void *arg)
 				mbuf_reset(
 				ops_enq[j]->ldpc_dec.hard_output.data);
 			if (hc_out || loopback)
-				mbuf_reset(
-				ops_enq[j]->ldpc_dec.harq_combined_output.data);
+				mbuf_reset(ops_enq[j]->ldpc_dec.harq_combined_output.data);
 		}
 		if (extDdr)
 			preload_harq_ddr(tp->dev_id, queue_id, ops_enq,
@@ -3339,8 +3774,7 @@ throughput_pmd_lcore_ldpc_dec(void *arg)
 
 	bufs = &tp->op_params->q_bufs[GET_SOCKET(info.socket_id)][queue_id];
 
-	while (rte_atomic16_read(&tp->op_params->sync) == SYNC_WAIT)
-		rte_pause();
+	rte_wait_until_equal_16(&tp->op_params->sync, SYNC_START, __ATOMIC_RELAXED);
 
 	ret = rte_bbdev_dec_op_alloc_bulk(tp->op_params->mp, ops_enq, num_ops);
 	TEST_ASSERT_SUCCESS(ret, "Allocation failed for %d ops", num_ops);
@@ -3456,8 +3890,7 @@ throughput_pmd_lcore_enc(void *arg)
 
 	bufs = &tp->op_params->q_bufs[GET_SOCKET(info.socket_id)][queue_id];
 
-	while (rte_atomic16_read(&tp->op_params->sync) == SYNC_WAIT)
-		rte_pause();
+	rte_wait_until_equal_16(&tp->op_params->sync, SYNC_START, __ATOMIC_RELAXED);
 
 	ret = rte_bbdev_enc_op_alloc_bulk(tp->op_params->mp, ops_enq,
 			num_ops);
@@ -3547,8 +3980,7 @@ throughput_pmd_lcore_ldpc_enc(void *arg)
 
 	bufs = &tp->op_params->q_bufs[GET_SOCKET(info.socket_id)][queue_id];
 
-	while (rte_atomic16_read(&tp->op_params->sync) == SYNC_WAIT)
-		rte_pause();
+	rte_wait_until_equal_16(&tp->op_params->sync, SYNC_START, __ATOMIC_RELAXED);
 
 	ret = rte_bbdev_enc_op_alloc_bulk(tp->op_params->mp, ops_enq,
 			num_ops);
@@ -3605,6 +4037,94 @@ throughput_pmd_lcore_ldpc_enc(void *arg)
 			((double)total_time / (double)rte_get_tsc_hz());
 	tp->mbps = (((double)(num_ops * TEST_REPETITIONS * tb_len_bits))
 			/ 1000000.0) / ((double)total_time /
+			(double)rte_get_tsc_hz());
+
+	return TEST_SUCCESS;
+}
+
+static int
+throughput_pmd_lcore_fft(void *arg)
+{
+	struct thread_params *tp = arg;
+	uint16_t enq, deq;
+	uint64_t total_time = 0, start_time;
+	const uint16_t queue_id = tp->queue_id;
+	const uint16_t burst_sz = tp->op_params->burst_sz;
+	const uint16_t num_ops = tp->op_params->num_to_process;
+	struct rte_bbdev_fft_op *ops_enq[num_ops];
+	struct rte_bbdev_fft_op *ops_deq[num_ops];
+	struct rte_bbdev_fft_op *ref_op = tp->op_params->ref_fft_op;
+	struct test_buffers *bufs = NULL;
+	int i, j, ret;
+	struct rte_bbdev_info info;
+	uint16_t num_to_enq;
+
+	TEST_ASSERT_SUCCESS((burst_sz > MAX_BURST),
+			"BURST_SIZE should be <= %u", MAX_BURST);
+
+	rte_bbdev_info_get(tp->dev_id, &info);
+
+	TEST_ASSERT_SUCCESS((num_ops > info.drv.queue_size_lim),
+			"NUM_OPS cannot exceed %u for this device",
+			info.drv.queue_size_lim);
+
+	bufs = &tp->op_params->q_bufs[GET_SOCKET(info.socket_id)][queue_id];
+
+	rte_wait_until_equal_16(&tp->op_params->sync, SYNC_START, __ATOMIC_RELAXED);
+
+	ret = rte_bbdev_fft_op_alloc_bulk(tp->op_params->mp, ops_enq, num_ops);
+	TEST_ASSERT_SUCCESS(ret, "Allocation failed for %d ops", num_ops);
+
+	if (test_vector.op_type != RTE_BBDEV_OP_NONE)
+		copy_reference_fft_op(ops_enq, num_ops, 0, bufs->inputs,
+				bufs->hard_outputs, bufs->soft_outputs, ref_op);
+
+	/* Set counter to validate the ordering */
+	for (j = 0; j < num_ops; ++j)
+		ops_enq[j]->opaque_data = (void *)(uintptr_t)j;
+
+	for (i = 0; i < TEST_REPETITIONS; ++i) {
+
+		for (j = 0; j < num_ops; ++j)
+			mbuf_reset(ops_enq[j]->fft.base_output.data);
+
+		start_time = rte_rdtsc_precise();
+
+		for (enq = 0, deq = 0; enq < num_ops;) {
+			num_to_enq = burst_sz;
+
+			if (unlikely(num_ops - enq < num_to_enq))
+				num_to_enq = num_ops - enq;
+
+			enq += rte_bbdev_enqueue_fft_ops(tp->dev_id,
+					queue_id, &ops_enq[enq], num_to_enq);
+
+			deq += rte_bbdev_dequeue_fft_ops(tp->dev_id,
+					queue_id, &ops_deq[deq], enq - deq);
+		}
+
+		/* dequeue the remaining */
+		while (deq < enq) {
+			deq += rte_bbdev_dequeue_fft_ops(tp->dev_id,
+					queue_id, &ops_deq[deq], enq - deq);
+		}
+
+		total_time += rte_rdtsc_precise() - start_time;
+	}
+
+	if (test_vector.op_type != RTE_BBDEV_OP_NONE) {
+		ret = validate_fft_op(ops_deq, num_ops, ref_op);
+		TEST_ASSERT_SUCCESS(ret, "Validation failed!");
+	}
+
+	rte_bbdev_fft_op_free_bulk(ops_enq, num_ops);
+
+	double tb_len_bits = calc_fft_size(ref_op);
+
+	tp->ops_per_sec = ((double)num_ops * TEST_REPETITIONS) /
+			((double)total_time / (double)rte_get_tsc_hz());
+	tp->mbps = (((double)(num_ops * TEST_REPETITIONS * tb_len_bits)) /
+			1000000.0) / ((double)total_time /
 			(double)rte_get_tsc_hz());
 
 	return TEST_SUCCESS;
@@ -3731,7 +4251,7 @@ bler_test(struct active_device *ad,
 	else
 		return TEST_SKIPPED;
 
-	rte_atomic16_set(&op_params->sync, SYNC_WAIT);
+	__atomic_store_n(&op_params->sync, SYNC_WAIT, __ATOMIC_RELAXED);
 
 	/* Main core is set at first entry */
 	t_params[0].dev_id = ad->dev_id;
@@ -3754,7 +4274,7 @@ bler_test(struct active_device *ad,
 				&t_params[used_cores++], lcore_id);
 	}
 
-	rte_atomic16_set(&op_params->sync, SYNC_START);
+	__atomic_store_n(&op_params->sync, SYNC_START, __ATOMIC_RELAXED);
 	ret = bler_function(&t_params[0]);
 
 	/* Main core is always used */
@@ -3825,6 +4345,8 @@ throughput_test(struct active_device *ad,
 			throughput_function = throughput_intr_lcore_enc;
 		else if (test_vector.op_type == RTE_BBDEV_OP_LDPC_ENC)
 			throughput_function = throughput_intr_lcore_ldpc_enc;
+		else if (test_vector.op_type == RTE_BBDEV_OP_FFT)
+			throughput_function = throughput_intr_lcore_fft;
 		else
 			throughput_function = throughput_intr_lcore_enc;
 
@@ -3845,11 +4367,13 @@ throughput_test(struct active_device *ad,
 			throughput_function = throughput_pmd_lcore_enc;
 		else if (test_vector.op_type == RTE_BBDEV_OP_LDPC_ENC)
 			throughput_function = throughput_pmd_lcore_ldpc_enc;
+		else if (test_vector.op_type == RTE_BBDEV_OP_FFT)
+			throughput_function = throughput_pmd_lcore_fft;
 		else
 			throughput_function = throughput_pmd_lcore_enc;
 	}
 
-	rte_atomic16_set(&op_params->sync, SYNC_WAIT);
+	__atomic_store_n(&op_params->sync, SYNC_WAIT, __ATOMIC_RELAXED);
 
 	/* Main core is set at first entry */
 	t_params[0].dev_id = ad->dev_id;
@@ -3872,7 +4396,7 @@ throughput_test(struct active_device *ad,
 				&t_params[used_cores++], lcore_id);
 	}
 
-	rte_atomic16_set(&op_params->sync, SYNC_START);
+	__atomic_store_n(&op_params->sync, SYNC_START, __ATOMIC_RELAXED);
 	ret = throughput_function(&t_params[0]);
 
 	/* Main core is always used */
@@ -3902,29 +4426,29 @@ throughput_test(struct active_device *ad,
 	 * Wait for main lcore operations.
 	 */
 	tp = &t_params[0];
-	while ((rte_atomic16_read(&tp->nb_dequeued) <
-			op_params->num_to_process) &&
-			(rte_atomic16_read(&tp->processing_status) !=
-			TEST_FAILED))
+	while ((__atomic_load_n(&tp->nb_dequeued, __ATOMIC_RELAXED) <
+		op_params->num_to_process) &&
+		(__atomic_load_n(&tp->processing_status, __ATOMIC_RELAXED) !=
+		TEST_FAILED))
 		rte_pause();
 
 	tp->ops_per_sec /= TEST_REPETITIONS;
 	tp->mbps /= TEST_REPETITIONS;
-	ret |= (int)rte_atomic16_read(&tp->processing_status);
+	ret |= (int)__atomic_load_n(&tp->processing_status, __ATOMIC_RELAXED);
 
 	/* Wait for worker lcores operations */
 	for (used_cores = 1; used_cores < num_lcores; used_cores++) {
 		tp = &t_params[used_cores];
 
-		while ((rte_atomic16_read(&tp->nb_dequeued) <
-				op_params->num_to_process) &&
-				(rte_atomic16_read(&tp->processing_status) !=
-				TEST_FAILED))
+		while ((__atomic_load_n(&tp->nb_dequeued, __ATOMIC_RELAXED) <
+			op_params->num_to_process) &&
+			(__atomic_load_n(&tp->processing_status, __ATOMIC_RELAXED) !=
+			TEST_FAILED))
 			rte_pause();
 
 		tp->ops_per_sec /= TEST_REPETITIONS;
 		tp->mbps /= TEST_REPETITIONS;
-		ret |= (int)rte_atomic16_read(&tp->processing_status);
+		ret |= (int)__atomic_load_n(&tp->processing_status, __ATOMIC_RELAXED);
 	}
 
 	/* Print throughput if test passed */
@@ -4234,6 +4758,74 @@ latency_test_ldpc_enc(struct rte_mempool *mempool,
 	return i;
 }
 
+
+static int
+latency_test_fft(struct rte_mempool *mempool,
+		struct test_buffers *bufs, struct rte_bbdev_fft_op *ref_op,
+		uint16_t dev_id, uint16_t queue_id,
+		const uint16_t num_to_process, uint16_t burst_sz,
+		uint64_t *total_time, uint64_t *min_time, uint64_t *max_time)
+{
+	int ret = TEST_SUCCESS;
+	uint16_t i, j, dequeued;
+	struct rte_bbdev_fft_op *ops_enq[MAX_BURST], *ops_deq[MAX_BURST];
+	uint64_t start_time = 0, last_time = 0;
+
+	for (i = 0, dequeued = 0; dequeued < num_to_process; ++i) {
+		uint16_t enq = 0, deq = 0;
+		bool first_time = true;
+		last_time = 0;
+
+		if (unlikely(num_to_process - dequeued < burst_sz))
+			burst_sz = num_to_process - dequeued;
+
+		ret = rte_bbdev_fft_op_alloc_bulk(mempool, ops_enq, burst_sz);
+		TEST_ASSERT_SUCCESS(ret,
+				"rte_bbdev_fft_op_alloc_bulk() failed");
+		if (test_vector.op_type != RTE_BBDEV_OP_NONE)
+			copy_reference_fft_op(ops_enq, burst_sz, dequeued,
+					bufs->inputs,
+					bufs->hard_outputs, bufs->soft_outputs,
+					ref_op);
+
+		/* Set counter to validate the ordering */
+		for (j = 0; j < burst_sz; ++j)
+			ops_enq[j]->opaque_data = (void *)(uintptr_t)j;
+
+		start_time = rte_rdtsc_precise();
+
+		enq = rte_bbdev_enqueue_fft_ops(dev_id, queue_id,
+				&ops_enq[enq], burst_sz);
+		TEST_ASSERT(enq == burst_sz,
+				"Error enqueueing burst, expected %u, got %u",
+				burst_sz, enq);
+
+		/* Dequeue */
+		do {
+			deq += rte_bbdev_dequeue_fft_ops(dev_id, queue_id,
+					&ops_deq[deq], burst_sz - deq);
+			if (likely(first_time && (deq > 0))) {
+				last_time += rte_rdtsc_precise() - start_time;
+				first_time = false;
+			}
+		} while (unlikely(burst_sz != deq));
+
+		*max_time = RTE_MAX(*max_time, last_time);
+		*min_time = RTE_MIN(*min_time, last_time);
+		*total_time += last_time;
+
+		if (test_vector.op_type != RTE_BBDEV_OP_NONE) {
+			ret = validate_fft_op(ops_deq, burst_sz, ref_op);
+			TEST_ASSERT_SUCCESS(ret, "Validation failed!");
+		}
+
+		rte_bbdev_fft_op_free_bulk(ops_enq, deq);
+		dequeued += deq;
+	}
+
+	return i;
+}
+
 /* Common function for running validation and latency test cases */
 static int
 validation_latency_test(struct active_device *ad,
@@ -4285,6 +4877,12 @@ validation_latency_test(struct active_device *ad,
 				ad->dev_id, queue_id, num_to_process,
 				burst_sz, &total_time, &min_time, &max_time,
 				latency_flag);
+	else if (op_type == RTE_BBDEV_OP_FFT)
+		iter = latency_test_fft(op_params->mp, bufs,
+				op_params->ref_fft_op,
+				ad->dev_id, queue_id,
+				num_to_process, burst_sz, &total_time,
+				&min_time, &max_time);
 	else /* RTE_BBDEV_OP_TURBO_ENC */
 		iter = latency_test_enc(op_params->mp, bufs,
 				op_params->ref_enc_op,
@@ -4338,9 +4936,93 @@ get_bbdev_queue_stats(uint16_t dev_id, uint16_t queue_id,
 	stats->dequeued_count = q_stats->dequeued_count;
 	stats->enqueue_err_count = q_stats->enqueue_err_count;
 	stats->dequeue_err_count = q_stats->dequeue_err_count;
+	stats->enqueue_warn_count = q_stats->enqueue_warn_count;
+	stats->dequeue_warn_count = q_stats->dequeue_warn_count;
 	stats->acc_offload_cycles = q_stats->acc_offload_cycles;
 
 	return 0;
+}
+
+static int
+offload_latency_test_fft(struct rte_mempool *mempool, struct test_buffers *bufs,
+		struct rte_bbdev_fft_op *ref_op, uint16_t dev_id,
+		uint16_t queue_id, const uint16_t num_to_process,
+		uint16_t burst_sz, struct test_time_stats *time_st)
+{
+	int i, dequeued, ret;
+	struct rte_bbdev_fft_op *ops_enq[MAX_BURST], *ops_deq[MAX_BURST];
+	uint64_t enq_start_time, deq_start_time;
+	uint64_t enq_sw_last_time, deq_last_time;
+	struct rte_bbdev_stats stats;
+
+	for (i = 0, dequeued = 0; dequeued < num_to_process; ++i) {
+		uint16_t enq = 0, deq = 0;
+
+		if (unlikely(num_to_process - dequeued < burst_sz))
+			burst_sz = num_to_process - dequeued;
+
+		ret = rte_bbdev_fft_op_alloc_bulk(mempool, ops_enq, burst_sz);
+		TEST_ASSERT_SUCCESS(ret, "Allocation failed for %d ops", burst_sz);
+		if (test_vector.op_type != RTE_BBDEV_OP_NONE)
+			copy_reference_fft_op(ops_enq, burst_sz, dequeued,
+					bufs->inputs,
+					bufs->hard_outputs, bufs->soft_outputs,
+					ref_op);
+
+		/* Start time meas for enqueue function offload latency */
+		enq_start_time = rte_rdtsc_precise();
+		do {
+			enq += rte_bbdev_enqueue_fft_ops(dev_id, queue_id,
+					&ops_enq[enq], burst_sz - enq);
+		} while (unlikely(burst_sz != enq));
+
+		ret = get_bbdev_queue_stats(dev_id, queue_id, &stats);
+		TEST_ASSERT_SUCCESS(ret,
+				"Failed to get stats for queue (%u) of device (%u)",
+				queue_id, dev_id);
+
+		enq_sw_last_time = rte_rdtsc_precise() - enq_start_time -
+				stats.acc_offload_cycles;
+		time_st->enq_sw_max_time = RTE_MAX(time_st->enq_sw_max_time,
+				enq_sw_last_time);
+		time_st->enq_sw_min_time = RTE_MIN(time_st->enq_sw_min_time,
+				enq_sw_last_time);
+		time_st->enq_sw_total_time += enq_sw_last_time;
+
+		time_st->enq_acc_max_time = RTE_MAX(time_st->enq_acc_max_time,
+				stats.acc_offload_cycles);
+		time_st->enq_acc_min_time = RTE_MIN(time_st->enq_acc_min_time,
+				stats.acc_offload_cycles);
+		time_st->enq_acc_total_time += stats.acc_offload_cycles;
+
+		/* give time for device to process ops */
+		rte_delay_us(WAIT_OFFLOAD_US);
+
+		/* Start time meas for dequeue function offload latency */
+		deq_start_time = rte_rdtsc_precise();
+		/* Dequeue one operation */
+		do {
+			deq += rte_bbdev_dequeue_fft_ops(dev_id, queue_id,
+					&ops_deq[deq], enq);
+		} while (unlikely(deq == 0));
+
+		deq_last_time = rte_rdtsc_precise() - deq_start_time;
+		time_st->deq_max_time = RTE_MAX(time_st->deq_max_time,
+				deq_last_time);
+		time_st->deq_min_time = RTE_MIN(time_st->deq_min_time,
+				deq_last_time);
+		time_st->deq_total_time += deq_last_time;
+
+		/* Dequeue remaining operations if needed*/
+		while (burst_sz != deq)
+			deq += rte_bbdev_dequeue_fft_ops(dev_id, queue_id,
+					&ops_deq[deq], burst_sz - deq);
+
+		rte_bbdev_fft_op_free_bulk(ops_enq, deq);
+		dequeued += deq;
+	}
+
+	return i;
 }
 
 static int
@@ -4361,7 +5043,8 @@ offload_latency_test_dec(struct rte_mempool *mempool, struct test_buffers *bufs,
 		if (unlikely(num_to_process - dequeued < burst_sz))
 			burst_sz = num_to_process - dequeued;
 
-		rte_bbdev_dec_op_alloc_bulk(mempool, ops_enq, burst_sz);
+		ret = rte_bbdev_dec_op_alloc_bulk(mempool, ops_enq, burst_sz);
+		TEST_ASSERT_SUCCESS(ret, "Allocation failed for %d ops", burst_sz);
 		if (test_vector.op_type != RTE_BBDEV_OP_NONE)
 			copy_reference_dec_op(ops_enq, burst_sz, dequeued,
 					bufs->inputs,
@@ -4446,7 +5129,8 @@ offload_latency_test_ldpc_dec(struct rte_mempool *mempool,
 		if (unlikely(num_to_process - dequeued < burst_sz))
 			burst_sz = num_to_process - dequeued;
 
-		rte_bbdev_dec_op_alloc_bulk(mempool, ops_enq, burst_sz);
+		ret = rte_bbdev_dec_op_alloc_bulk(mempool, ops_enq, burst_sz);
+		TEST_ASSERT_SUCCESS(ret, "Allocation failed for %d ops", burst_sz);
 		if (test_vector.op_type != RTE_BBDEV_OP_NONE)
 			copy_reference_ldpc_dec_op(ops_enq, burst_sz, dequeued,
 					bufs->inputs,
@@ -4698,7 +5382,7 @@ offload_cost_test(struct active_device *ad,
 	printf("Set RTE_BBDEV_OFFLOAD_COST to 'y' to turn the test on.\n");
 	return TEST_SKIPPED;
 #else
-	int iter;
+	int iter, ret;
 	uint16_t burst_sz = op_params->burst_sz;
 	const uint16_t num_to_process = op_params->num_to_process;
 	const enum rte_bbdev_op_type op_type = test_vector.op_type;
@@ -4741,6 +5425,10 @@ offload_cost_test(struct active_device *ad,
 	else if (op_type == RTE_BBDEV_OP_LDPC_DEC)
 		iter = offload_latency_test_ldpc_dec(op_params->mp, bufs,
 			op_params->ref_dec_op, ad->dev_id, queue_id,
+			num_to_process, burst_sz, &time_st);
+	else if (op_type == RTE_BBDEV_OP_FFT)
+		iter = offload_latency_test_fft(op_params->mp, bufs,
+			op_params->ref_fft_op, ad->dev_id, queue_id,
 			num_to_process, burst_sz, &time_st);
 	else
 		iter = offload_latency_test_enc(op_params->mp, bufs,
@@ -4789,7 +5477,10 @@ offload_cost_test(struct active_device *ad,
 			rte_get_tsc_hz());
 
 	struct rte_bbdev_stats stats = {0};
-	get_bbdev_queue_stats(ad->dev_id, queue_id, &stats);
+	ret = get_bbdev_queue_stats(ad->dev_id, queue_id, &stats);
+	TEST_ASSERT_SUCCESS(ret,
+			"Failed to get stats for queue (%u) of device (%u)",
+			queue_id, ad->dev_id);
 	if (op_type != RTE_BBDEV_OP_LDPC_DEC) {
 		TEST_ASSERT_SUCCESS(stats.enqueued_count != num_to_process,
 				"Mismatch in enqueue count %10"PRIu64" %d",

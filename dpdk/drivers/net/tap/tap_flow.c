@@ -11,6 +11,7 @@
 
 #include <rte_byteorder.h>
 #include <rte_jhash.h>
+#include <rte_random.h>
 #include <rte_malloc.h>
 #include <rte_eth_tap.h>
 #include <tap_flow.h>
@@ -1082,8 +1083,11 @@ priv_flow_process(struct pmd_internals *pmd,
 		}
 		/* use flower filter type */
 		tap_nlattr_add(&flow->msg.nh, TCA_KIND, sizeof("flower"), "flower");
-		if (tap_nlattr_nested_start(&flow->msg, TCA_OPTIONS) < 0)
-			goto exit_item_not_supported;
+		if (tap_nlattr_nested_start(&flow->msg, TCA_OPTIONS) < 0) {
+			rte_flow_error_set(error, ENOMEM, RTE_FLOW_ERROR_TYPE_ACTION,
+					   actions, "could not allocated netlink msg");
+			goto exit_return_error;
+		}
 	}
 	for (; items->type != RTE_FLOW_ITEM_TYPE_END; ++items) {
 		const struct tap_flow_items *token = NULL;
@@ -1199,9 +1203,12 @@ actions:
 			if (action)
 				goto exit_action_not_supported;
 			action = 1;
-			if (!queue ||
-			    (queue->index > pmd->dev->data->nb_rx_queues - 1))
-				goto exit_action_not_supported;
+			if (queue->index >= pmd->dev->data->nb_rx_queues) {
+				rte_flow_error_set(error, ERANGE,
+						   RTE_FLOW_ERROR_TYPE_ACTION, actions,
+						   "queue index out of range");
+				goto exit_return_error;
+			}
 			if (flow) {
 				struct action_data adata = {
 					.id = "skbedit",
@@ -1227,7 +1234,7 @@ actions:
 			if (!pmd->rss_enabled) {
 				err = rss_enable(pmd, attr, error);
 				if (err)
-					goto exit_action_not_supported;
+					goto exit_return_error;
 			}
 			if (flow)
 				err = rss_add_actions(flow, pmd, rss, error);
@@ -1235,7 +1242,7 @@ actions:
 			goto exit_action_not_supported;
 		}
 		if (err)
-			goto exit_action_not_supported;
+			goto exit_return_error;
 	}
 	/* When fate is unknown, drop traffic. */
 	if (!action) {
@@ -1258,6 +1265,7 @@ exit_item_not_supported:
 exit_action_not_supported:
 	rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_ACTION,
 			   actions, "action not supported");
+exit_return_error:
 	return -rte_errno;
 }
 
@@ -1290,9 +1298,7 @@ tap_flow_validate(struct rte_eth_dev *dev,
  * In those rules, the handle (uint32_t) is the part that would identify
  * specifically each rule.
  *
- * On 32-bit architectures, the handle can simply be the flow's pointer address.
- * On 64-bit architectures, we rely on jhash(flow) to find a (sufficiently)
- * unique handle.
+ * Use jhash of the flow pointer to make a unique handle.
  *
  * @param[in, out] flow
  *   The flow that needs its handle set.
@@ -1302,16 +1308,18 @@ tap_flow_set_handle(struct rte_flow *flow)
 {
 	union {
 		struct rte_flow *flow;
-		const void *key;
-	} tmp;
-	uint32_t handle = 0;
+		uint32_t words[sizeof(flow) / sizeof(uint32_t)];
+	} tmp = {
+		.flow = flow,
+	};
+	uint32_t handle;
+	static uint64_t hash_seed;
 
-	tmp.flow = flow;
+	if (hash_seed == 0)
+		hash_seed = rte_rand();
 
-	if (sizeof(flow) > 4)
-		handle = rte_jhash(tmp.key, sizeof(flow), 1);
-	else
-		handle = (uintptr_t)flow;
+	handle = rte_jhash_32b(tmp.words, sizeof(flow) / sizeof(uint32_t), hash_seed);
+
 	/* must be at least 1 to avoid letting the kernel choose one for us */
 	if (!handle)
 		handle = 1;
@@ -1465,8 +1473,7 @@ tap_flow_create(struct rte_eth_dev *dev,
 	}
 	return flow;
 fail:
-	if (remote_flow)
-		rte_free(remote_flow);
+	rte_free(remote_flow);
 	if (flow)
 		tap_flow_free(pmd, flow);
 	return NULL;
@@ -1541,8 +1548,7 @@ tap_flow_destroy_pmd(struct pmd_internals *pmd,
 		}
 	}
 end:
-	if (remote_flow)
-		rte_free(remote_flow);
+	rte_free(remote_flow);
 	tap_flow_free(pmd, flow);
 	return ret;
 }
@@ -1589,7 +1595,7 @@ tap_flow_isolate(struct rte_eth_dev *dev,
 	 * If netdevice is there, setup appropriate flow rules immediately.
 	 * Otherwise it will be set when bringing up the netdevice (tun_alloc).
 	 */
-	if (!process_private->rxq_fds[0])
+	if (process_private->rxq_fds[0] == -1)
 		return 0;
 	if (set) {
 		struct rte_flow *remote_flow;
@@ -1684,7 +1690,7 @@ int tap_flow_implicit_create(struct pmd_internals *pmd,
 	struct rte_flow_item *items = implicit_rte_flows[idx].items;
 	struct rte_flow_attr *attr = &implicit_rte_flows[idx].attr;
 	struct rte_flow_item_eth eth_local = { .type = 0 };
-	uint16_t if_index = pmd->remote_if_index;
+	unsigned int if_index = pmd->remote_if_index;
 	struct rte_flow *remote_flow = NULL;
 	struct nlmsg *msg = NULL;
 	int err = 0;
@@ -1764,8 +1770,7 @@ int tap_flow_implicit_create(struct pmd_internals *pmd,
 success:
 	return 0;
 fail:
-	if (remote_flow)
-		rte_free(remote_flow);
+	rte_free(remote_flow);
 	return -1;
 }
 
@@ -2166,35 +2171,20 @@ static int rss_add_actions(struct rte_flow *flow, struct pmd_internals *pmd,
 }
 
 /**
- * Manage filter operations.
+ * Get rte_flow operations.
  *
  * @param dev
  *   Pointer to Ethernet device structure.
- * @param filter_type
- *   Filter type.
- * @param filter_op
- *   Operation to perform.
- * @param arg
+ * @param ops
  *   Pointer to operation-specific structure.
  *
  * @return
  *   0 on success, negative errno value on failure.
  */
 int
-tap_dev_filter_ctrl(struct rte_eth_dev *dev,
-		    enum rte_filter_type filter_type,
-		    enum rte_filter_op filter_op,
-		    void *arg)
+tap_dev_flow_ops_get(struct rte_eth_dev *dev __rte_unused,
+		     const struct rte_flow_ops **ops)
 {
-	switch (filter_type) {
-	case RTE_ETH_FILTER_GENERIC:
-		if (filter_op != RTE_ETH_FILTER_GET)
-			return -EINVAL;
-		*(const void **)arg = &tap_flow_ops;
-		return 0;
-	default:
-		TAP_LOG(ERR, "%p: filter type (%d) not supported",
-			dev, filter_type);
-	}
-	return -EINVAL;
+	*ops = &tap_flow_ops;
+	return 0;
 }

@@ -2,6 +2,136 @@
 
  F-Stack is an open source network framework based on DPDK.
 
+2024.10 F-Stack v1.24
+
+1. F-Stack lib, Sync some features from branch of dev:
+
+- Restore vEth0 to veth0 now.
+- Add kni type argument in config.ini and FF_KNI_KNI in lib/Makefile to set exception path type.
+- FF_FLOW_ISOLATE support DPDK-22.11.
+- Add net.add_addr_allfibs=1 in config.ini.
+- gettimeofday automatically compatible with different glibc versions.
+- Add an API ff_get_traffic to get traffic for QoS or other.
+- Add ff_stop_run to stop the poll loop. @renzibei
+- Add POSIX Like functions for pthread_create and pthread_join. @Radu Nichita
+- Fix pthread issue. @Vitaly Pavlov
+- Fix a build error with gcc-4.8.5.
+- Modify ff_port_cfg.port_id's type from uint8_t to unint16_t.
+- Modify INI_MAX_LINE from 200 to 2048 in lib/ff_ini_parser.h.
+- IPv6 addr and vaddr set autoconf by default.
+- Modify IPv4 vip addrs' broadaddr from x.x.x.255 to x.x.x.x, same as vip addr, because vips' netmask only support `255.255.255.255` now.
+- Add APi ff_dpdk_raw_packet_send to suppoort RAW packet send direty with DPDK by user APP not via socket.
+- Support automatic configuration of vlan and vlan ip, routing and the simplest policy routing.
+- Use soclose() instead of sofree() when initializing the configuration stack IP.
+- Support KNI ratelimit, default disable.
+- The msghdr.msg_iov->iov_base and msghdr.msg_iov->iov_len of ff_sendmsg() and ff_recvmsg() compatible with the Linux.
+
+1. FreeBSD
+
+- Add atomic_fcmpset_int32.
+- Fix some build errors of freebsd with gcc-12.2.0.
+- For f-stack to support QAT accelerator cards. @wenchengji.
+- Fix some build errors of freebsd with gcc-13.2.0.
+- Fix issue in Freebsd when building with GCC 14.1.0. @bjosv
+
+1. ff toos
+
+- Fix ff tools build error with gcc-13.2.0.
+- Fix netstat tool compilation on linux. Support `mawk` of ubuntu. @taras
+
+1. DPDK
+
+- DPDK: Upgrade to 22.11.6.
+- Fix a compilation warning of drivers mlx5.
+- Bump black from 22.10.0 to 24.3.0 in /dpdk/dts. @dependabot[bot]
+- kni_net.c compatible with -Wstringop-overflow with different gcc versions.
+
+1. APP
+
+- Nginx: gettimeofday automatically compatible with different glibc versions.
+- Nginx: Nginx's stream support transparent.
+
+1. adapter
+
+- syscall: Fix cplen calculation errors in ff_hook_syscall.c. @zhaozihanzzh
+- syscall: Close kernel epoll fd in ff_hook_close when using FF_KERNEL_EVENT. @zhaozihanzzh
+
+1. doc
+
+- modify doc that re-enable kni now, to remove kni later.
+- Modify nginx-1.16.1 to nginx-1.25.2 in docs.
+- Remove doc/F-Stack_Binary_Release_Quick_Start.md.
+- chore: update freebsd version in readme. @JamLee
+- Update ff tools README.md, use `ff_netstat -rnW` to display wider device name.
+- Update F-Stack_Quick_Start_Guide.md, add a cmd. @万能的翔王大人
+- Fix a typo in doc/F-Stack_Nginx_APP_Guide.md: "kernel_network_stack" -> "proxy_kernel_network_stack".
+-  Disable build driver crypto/openssl for Redhat/Centos 7.x.
+
+
+
+2023.09 F-Stack v1.23
+
+  1. F-Stack lib, Sync some features from branch of dev:
+
+  - Added FDIR using general flow rules. @guhaoyu2005.
+  - Added more clear error message in case of failed config read. @d06alexandrov.
+  - vlan_strip support kni.
+  - Removed deleted sources from Makefile. @d06alexandrov.
+  - make it compilable under O2 optimization, pass gcc check. @renzibei.
+  - enable -O2 by default. Ref #711 #721.
+  - Fix #702 F-stack rack and BBR both causes PCB memory leak.
+  - tcp: Missing mfree in rack and bbr.
+  - when nginx use setsockopt ON_LINGER, the seq number of the RST packet is error. @wenchengji159357.
+  - While use bbr, the hz should be set to 1000000, match the bintime and timer of F-Stack. Ref #701 #702.
+  - Redis can listen IPv6 address.
+  - Fix Compile Error with gcc 11.3.0(in Ubuntu 22.04). Close #736.
+  - Fixed #705. While Adding -DNDEBUG flag will cause the helloworld example.
+  - Add some description of `ff_socket()` and `ff_write()`. Ref #709.
+  - Modify pci_whitelist to allow that from DPDK 20.11. Close #745.
+  - fix that vtoslab doesn't return the correct slab. @zhutian.
+  - When entering the softclock function for the first time,ticks is 2147423648,cc_softticks is 0. @wenchengji159357.
+  - Add adapter for LD_PRELOAD. EXPERIMENTAL.
+  - fix cmsg for sendmsg. @sarosh.
+  - Fixed an issue that before C99 mode..
+  - Fiexd some build errors of ipfw on ubuntu 22.04 (kernel:5.19.0-1025, gcc:11.4.0),
+  - fix some issue of ff_sendmsg and ff_recvmsg.
+  - Support LINUX_IP_TRANSPARENT and LINUX_IPV6_TRANSPARENT to IP_BINDANY and IPV6_BINDANY in lib/ff_syscall_wrapper.c.
+
+  2. DPDK:
+
+  - DPDK: Upgrade to 21.11.5.
+  - Fix I40E_DEV_ID_10G_BASE_T_X722 issue.
+  - Update igb_uio, sync from git://dpdk.org/dpdk-kmods.
+
+  3. APP:
+
+  - Nginx: Upgrade to Nginx-1.25.2 to support HTTP3. EXPERIMENTAL.
+  - Add adapter for LD_PRELOAD. EXPERIMENTAL.
+  - move /app/micro_thread to adapter/micro_thread.
+  - Fix netmask in nginx conf. @jiegec.
+  - Fiexd some build errors of micro_thread on ubuntu 22.04 (kernel:5.19.0-1025, gcc:11.4.0),
+
+  4. example:
+
+  - Set non blocking in example/main.c. Ref #709.
+  - Add helloworld_stack_epoll、 main_stack_epoll_pipeline and kevent for LD_PRELOAD demo.
+  - Fiexd some build errors of example on ubuntu 22.04 (kernel:5.19.0-1025, gcc:11.4.0).
+
+
+2023.09 F-Stack v1.22.1
+
+  1. F-Stack lib:
+
+  - Fix #702 F-stack rack and BBR both causes PCB memory leak.
+  - While use bbr, the hz should be set to 1000000, match the bintime and timer of F-Stack. Ref #701 #702
+  - Modify pci_whitelist to allow that from DPDK 20.11. Close #745.
+
+  2. DPDK:
+
+  - Upgrade to DPDK-20.11.9(LTS).
+
+
+
 2022.09 F-Stack v1.22
 
   1. Freebsd

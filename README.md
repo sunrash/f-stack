@@ -22,7 +22,7 @@ To deal with the increasingly severe DDoS attacks the authorized DNS server of T
 
 After several months of development and testing, DKDNS, high-performance DNS server based on DPDK officially released in October 2013. It's capable of achieving up to 11 million QPS with a single 10GE port and 18.2 million QPS with two 10GE ports. And then we developed a user-space TCP/IP stack called F-Stack that can process 0.6 million RPS with a single 10GE port.
 
-With the fast growth of Tencent Cloud more and more of our services needed higher network access performance. Meanwhile, F-Stack was continuing to improve, being driven by our business growth, and, ultimately developed into a general network access framework. But our initial TCP/IP stack couldn't meet the needs of these services. Continuing to develop and maintain a complete high performance network stack would have been too expensive. After evaluating several plans; we finally determined to port FreeBSD's (11.0 stable) TCP/IP stack into F-Stack. Not only does this allow us to stop reinventing the wheel, we can take advantage of the the improvements the FreeBSD community will bring in the future. Thanks to [libplebnet](https://gitorious.org/freebsd/kmm-sandbox/commit/fa8a11970bc0ed092692736f175925766bebf6af?p=freebsd:kmm-sandbox.git;a=tree;f=lib/libplebnet;h=ae446dba0b4f8593b69b339ea667e12d5b709cfb;hb=refs/heads/work/svn_trunk_libplebnet) and [libuinet](https://github.com/pkelsey/libuinet) this work became a lot easier.
+With the fast growth of Tencent Cloud more and more of our services needed higher network access performance. Meanwhile, F-Stack was continuing to improve, being driven by our business growth, and, ultimately developed into a general network access framework. But our initial TCP/IP stack couldn't meet the needs of these services. Continuing to develop and maintain a complete high performance network stack would have been too expensive. After evaluating several plans; we finally determined to port FreeBSD's (13.0 stable) TCP/IP stack into F-Stack. Not only does this allow us to stop reinventing the wheel, we can take advantage of the the improvements the FreeBSD community will bring in the future. Thanks to [libplebnet](https://gitorious.org/freebsd/kmm-sandbox/commit/fa8a11970bc0ed092692736f175925766bebf6af?p=freebsd:kmm-sandbox.git;a=tree;f=lib/libplebnet;h=ae446dba0b4f8593b69b339ea667e12d5b709cfb;hb=refs/heads/work/svn_trunk_libplebnet) and [libuinet](https://github.com/pkelsey/libuinet) this work became a lot easier.
 
 With the rapid development of all kinds of applications, in order to help different APPs quick and easily use F-Stack, F-Stack has integrated Nginx, Redis and other commonly used APPs, and a micro thread framework, and provides a standard Epoll/Kqueue interface.
 
@@ -38,13 +38,21 @@ Currently, besides authorized DNS server of DNSPod, there are various products i
     yum install numactl-devel          # on Centos
     #sudo apt-get install libnuma-dev  # on Ubuntu
 
+    pip3 install pyelftools --upgrade
+    # Install python and modules for running DPDK python scripts
+    pip3 install pyelftools --upgrade # RedHat/Centos
+    sudo apt install python # On ubuntu
+    #sudo pkg install python # On FreeBSD
+
     # Install dependencies (FreeBSD only)
     #pkg install meson pkgconf py38-pyelftools
 
     cd f-stack
     # Compile DPDK
     cd dpdk/
-    meson -Denable_kmods=true build
+    # re-enable kni now, to remove kni later
+    # disable crypto/openssl for Redhat/Centos 7.x.
+    meson -Denable_kmods=true -Ddisable_libs=flow_classify -Ddisable_drivers=crypto/openssl build
     ninja -C build
     ninja -C build install
 
@@ -62,10 +70,6 @@ Currently, besides authorized DNS server of DNSPod, there are various products i
 
     # Close ASLR; it is necessary in multiple process (Linux only)
     echo 0 > /proc/sys/kernel/randomize_va_space
-
-    # Install python for running DPDK python scripts
-    sudo apt install python # On ubuntu
-    #sudo pkg install python # On FreeBSD
 
     # Offload NIC
     # For Linux:
@@ -120,7 +124,7 @@ Currently, besides authorized DNS server of DNSPod, there are various products i
 
 #### Nginx
 
-    cd app/nginx-1.16.1
+    cd app/nginx-1.25.2
     bash ./configure --prefix=/usr/local/nginx_fstack --with-ff_module
     make
     make install
@@ -133,7 +137,7 @@ for more details, see [nginx guide](https://github.com/F-Stack/f-stack/blob/mast
 
     cd app/redis-6.2.6/deps/jemalloc
     ./autogen.sh 
-    cd app/redis-6.2.6/
+    cd ../..
     make
     make install
 
@@ -189,4 +193,4 @@ See [LICENSE](LICENSE)
 Tencent Cloud F-Stack team developed F-Stack which is a general network framework based on DPDK and provides ultra high network performance. We are here looking for more and more talented people with great passion on technology to join us. You would have the chance to work with brightest minds on this planet and help Tencent cloud and F-stack continuously evolve. Send us your resume or refer your friend to us if you are interested in joining us.
 
 Open Positions: Software engineer(C/C++), Web developer, IOS/Android developer, Product Manager, Operating Manager, etc.
-Contact: Please send your resume to [us](mailto:allanhuang@tencent.com)
+Contact: Please send your resume to [us](mailto:fengbojiang@tencent.com)

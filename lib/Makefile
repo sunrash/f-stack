@@ -20,7 +20,7 @@ PREFIX_LIB=${PREFIX}/lib
 PREFIX_INCLUDE=/usr/local/include
 PREFIX_BIN=/usr/local/bin
 F-STACK_CONF=/etc/f-stack.conf
-F-STACK_VERSION=1.22
+F-STACK_VERSION=1.24
 TGT_OS=$(shell uname)
 ifeq ($(TGT_OS),FreeBSD)
 CC=gcc
@@ -28,14 +28,16 @@ endif
 
 HOST_OS:=$(shell uname -s)
 
-DEBUG=-O0 -gdwarf-2 -g3 -Wno-format-truncation
+#DEBUG=-O0 -gdwarf-2 -g3 -Wno-format-truncation
 
 # No DPDK KNI support on FreeBSD
 ifneq ($(TGT_OS),FreeBSD)
 FF_KNI=1
+#FF_KNI_KNI=1
 endif
 
 #FF_FLOW_ISOLATE=1
+#FF_FDIR=1
 
 # NETGRAPH drivers ipfw
 #FF_NETGRAPH=1
@@ -81,8 +83,16 @@ ifdef FF_KNI
 HOST_CFLAGS+= -DFF_KNI
 endif
 
+ifdef FF_KNI_KNI
+HOST_CFLAGS+= -DFF_KNI_KNI
+endif
+
 HOST_CFLAGS+= ${DPDK_CFLAGS}
 HOST_CFLAGS+= ${CONF_CFLAGS}
+
+ifdef FF_FDIR
+HOST_CFLAGS+= -DFF_FDIR
+endif
 
 ifdef FF_FLOW_ISOLATE
 HOST_CFLAGS+= -DFF_FLOW_ISOLATE
@@ -94,6 +104,7 @@ endif
 
 ifdef FF_IPFW
 HOST_CFLAGS+= -DFF_IPFW
+CFLAGS+= -DFF_IPFW
 endif
 
 ifdef FF_USE_PAGE_ARRAY
@@ -104,13 +115,18 @@ HOST_CFLAGS+= -DINET
 CFLAGS+= -DINET
 
 GCCVERGE10 = $(shell expr `gcc -dumpversion | cut -f1 -d.` \>= 10)
-ifeq "$(GCCVERGE10)" "1" 
+ifeq "$(GCCVERGE10)" "1"
     CFLAGS+= -Wno-error=stringop-overflow
 endif 
 
 GCCVERGE11 = $(shell expr `gcc -dumpversion | cut -f1 -d.` \>= 11)
-ifeq "$(GCCVERGE11)" "1" 
+ifeq "$(GCCVERGE11)" "1"
     CFLAGS+= -Wno-error=stringop-overread
+endif
+
+GCCVERGE13 = $(shell expr `gcc -dumpversion | cut -f1 -d.` \>= 13)
+ifeq "$(GCCVERGE13)" "1"
+    CFLAGS+= -Wno-error=dangling-pointer
 endif
 
 ifdef FF_INET6
@@ -120,6 +136,11 @@ endif
 
 ifdef FF_TCPHPTS
 CFLAGS+= -DTCPHPTS -DRATELIMIT
+endif
+
+ifdef FF_IPSEC
+HOST_CFLAGS+= -DIPSEC
+CFLAGS+= -DIPSEC
 endif
 
 HOST_C= ${CC} -c $(HOST_CFLAGS) ${HOST_INCLUDES} ${WERROR} ${PROF} $<
@@ -247,6 +268,7 @@ endif
 
 FF_HOST_SRCS+=              \
 	ff_host_interface.c \
+	ff_thread.c			\
 	ff_config.c         \
 	ff_ini_parser.c     \
 	ff_dpdk_if.c        \
@@ -265,12 +287,8 @@ FF_HOST_SRCS+=              \
 endif
 
 ifdef FF_IPSEC
-CRYPTO_ASM_SRCS+=                       \
-	aesencdec_${MACHINE_CPUARCH}.S  \
-	aeskeys_${MACHINE_CPUARCH}.S
-
 CRYPTO_SRCS+=               \
-	aesni.c	            \
+	#aesni.c	            \
 	aesni_wrap.c        \
 	bf_ecb.c            \
 	bf_enc.c            \
@@ -572,16 +590,6 @@ NETIPFW_SRCS+=             \
 endif
 
 ifdef FF_IPSEC
-NETINET_SRCS+=		\
-	ip_ipsec.c
-ifdef FF_INET6
-NETINET6_SRCS+=		\
-	ip6_ipsec.c
-endif
-endif
-
-
-ifdef FF_IPSEC
 NETIPSEC_SRCS+=		\
 	ipsec.c		\
 	ipsec_input.c	\
@@ -600,13 +608,11 @@ endif
 
 ifdef FF_IPSEC
 OPENCRYPTO_SRCS+=	\
-	cast.c		\
 	criov.c		\
 	crypto.c	\
 	cryptosoft.c	\
-	deflate.c	\
+	cryptodeflate.c	\
 	rmd160.c	\
-	skipjack.c	\
 	xform.c
 endif
 

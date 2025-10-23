@@ -2,7 +2,7 @@
  * Copyright(c) 2018-2021 HiSilicon Limited.
  */
 
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_hash.h>
 #include <rte_hash_crc.h>
 #include <rte_io.h>
@@ -321,7 +321,7 @@ int hns3_init_fd_config(struct hns3_adapter *hns)
 		break;
 	default:
 		hns3_err(hw, "Unsupported flow director mode %u",
-			    pf->fdir.fd_cfg.fd_mode);
+			 pf->fdir.fd_cfg.fd_mode);
 		return -EOPNOTSUPP;
 	}
 
@@ -336,6 +336,8 @@ int hns3_init_fd_config(struct hns3_adapter *hns)
 	    BIT(INNER_IP_PROTO) | BIT(INNER_IP_TOS) |
 	    BIT(INNER_SRC_IP) | BIT(INNER_DST_IP) |
 	    BIT(INNER_SRC_PORT) | BIT(INNER_DST_PORT);
+	hns3_dbg(hw, "fdir tuple: inner<vlan_tag1 eth_type ip_src ip_dst "
+		 "ip_proto ip_tos l4_src_port l4_dst_port>");
 
 	/* If use max 400bit key, we can support tuples for ether type */
 	if (pf->fdir.fd_cfg.max_key_length == MAX_KEY_LENGTH) {
@@ -345,6 +347,9 @@ int hns3_init_fd_config(struct hns3_adapter *hns)
 		    BIT(OUTER_DST_PORT) | BIT(INNER_VLAN_TAG2) |
 		    BIT(OUTER_TUN_VNI) | BIT(OUTER_TUN_FLOW_ID) |
 		    BIT(OUTER_ETH_TYPE) | BIT(OUTER_IP_PROTO);
+		hns3_dbg(hw, "fdir tuple more: inner<dst_mac src_mac "
+			 "vlan_tag2 sctp_tag> outer<eth_type ip_proto "
+			 "l4_src_port l4_dst_port tun_vni tun_flow_id>");
 	}
 
 	/* roce_type is used to filter roce frames
@@ -352,6 +357,7 @@ int hns3_init_fd_config(struct hns3_adapter *hns)
 	 */
 	key_cfg->meta_data_active = BIT(DST_VPORT) | BIT(TUNNEL_PACKET) |
 	    BIT(VLAN_NUMBER);
+	hns3_dbg(hw, "fdir meta data: dst_vport tunnel_packet vlan_number");
 
 	ret = hns3_get_fd_allocation(hw,
 				     &pf->fdir.fd_cfg.rule_num[HNS3_FD_STAGE_1],
@@ -360,6 +366,12 @@ int hns3_init_fd_config(struct hns3_adapter *hns)
 				     &pf->fdir.fd_cfg.cnt_num[HNS3_FD_STAGE_2]);
 	if (ret)
 		return ret;
+
+	hns3_dbg(hw, "fdir: stage1<rules-%u counters-%u> stage2<rules-%u counters=%u>",
+		 pf->fdir.fd_cfg.rule_num[HNS3_FD_STAGE_1],
+		 pf->fdir.fd_cfg.cnt_num[HNS3_FD_STAGE_1],
+		 pf->fdir.fd_cfg.rule_num[HNS3_FD_STAGE_2],
+		 pf->fdir.fd_cfg.cnt_num[HNS3_FD_STAGE_2]);
 
 	return hns3_set_fd_key_config(hns);
 }
@@ -407,7 +419,7 @@ static int hns3_fd_tcam_config(struct hns3_hw *hw, bool sel_x, int loc,
 	ret = hns3_cmd_send(hw, desc, FD_TCAM_CMD_NUM);
 	if (ret)
 		hns3_err(hw, "Config tcam key fail, ret=%d loc=%d add=%d",
-			    ret, loc, is_add);
+			 ret, loc, is_add);
 	return ret;
 }
 
@@ -660,6 +672,7 @@ static void hns3_fd_convert_meta_data(struct hns3_fd_key_cfg *cfg,
 		} else if (i == VLAN_NUMBER) {
 			uint32_t vlan_tag;
 			uint8_t vlan_num;
+
 			if (rule->key_conf.spec.tunnel_type == 0)
 				vlan_num = rule->key_conf.vlan_num;
 			else
@@ -745,14 +758,14 @@ static int hns3_config_key(struct hns3_adapter *hns,
 	ret = hns3_fd_tcam_config(hw, false, rule->location, key_y, true);
 	if (ret) {
 		hns3_err(hw, "Config fd key_y fail, loc=%u, ret=%d",
-			    rule->queue_id, ret);
+			 rule->queue_id, ret);
 		return ret;
 	}
 
 	ret = hns3_fd_tcam_config(hw, true, rule->location, key_x, true);
 	if (ret)
 		hns3_err(hw, "Config fd key_x fail, loc=%u, ret=%d",
-			    rule->queue_id, ret);
+			 rule->queue_id, ret);
 	return ret;
 }
 
@@ -906,8 +919,7 @@ static int hns3_insert_fdir_filter(struct hns3_hw *hw,
 	sig = rte_hash_crc(key, sizeof(*key), 0);
 	ret = rte_hash_add_key_with_hash(fdir_info->hash_handle, key, sig);
 	if (ret < 0) {
-		hns3_err(hw, "Hash table full? err:%d(%s)!", ret,
-			 strerror(-ret));
+		hns3_err(hw, "Hash table full? err:%d!", ret);
 		return ret;
 	}
 
@@ -962,7 +974,7 @@ int hns3_fdir_filter_program(struct hns3_adapter *hns,
 				 rule->key_conf.spec.src_port,
 				 rule->key_conf.spec.dst_port, ret);
 		else
-			hns3_remove_fdir_filter(hw, fdir_info, &rule->key_conf);
+			ret = hns3_remove_fdir_filter(hw, fdir_info, &rule->key_conf);
 
 		return ret;
 	}
@@ -1056,6 +1068,9 @@ int hns3_restore_all_fdir_filter(struct hns3_adapter *hns)
 	bool err = false;
 	int ret;
 
+	if (hns->is_vf)
+		return 0;
+
 	/*
 	 * This API is called in the reset recovery process, the parent function
 	 * must hold hw->lock.
@@ -1087,7 +1102,7 @@ int hns3_restore_all_fdir_filter(struct hns3_adapter *hns)
 	return 0;
 }
 
-int hns3_get_count(struct hns3_hw *hw, uint32_t id, uint64_t *value)
+int hns3_fd_get_count(struct hns3_hw *hw, uint32_t id, uint64_t *value)
 {
 	struct hns3_fd_get_cnt_cmd *req;
 	struct hns3_cmd_desc desc;

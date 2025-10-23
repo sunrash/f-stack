@@ -187,6 +187,10 @@ See :doc:`../platform/dpaa` for setup information
 
 - Follow the DPDK :ref:`Getting Started Guide for Linux <linux_gsg>`
   to setup the basic DPDK environment.
+- DPAA driver has dependency on kernel to perform various functionalities.
+  So kernel and DPDK version should be compatible for proper working.
+  Refer release notes of NXP SDK guide to match the versions `NXP LSDK GUIDE
+  <https://www.nxp.com/design/software/embedded-software/linux-software-and-development-tools/layerscape-software-development-kit-v21-08:LAYERSCAPE-SDK>`_.
 
 .. note::
 
@@ -335,7 +339,7 @@ Maximum packet length
 ~~~~~~~~~~~~~~~~~~~~~
 
 The DPAA SoC family support a maximum of a 10240 jumbo frame. The value
-is fixed and cannot be changed. So, even when the ``rxmode.max_rx_pkt_len``
+is fixed and cannot be changed. So, even when the ``rxmode.mtu``
 member of ``struct rte_eth_conf`` is set to a value lower than 10240, frames
 up to 10240 bytes can still reach the host interface.
 

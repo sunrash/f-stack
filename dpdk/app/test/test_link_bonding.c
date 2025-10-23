@@ -2,7 +2,7 @@
  * Copyright(c) 2010-2014 Intel Corporation
  */
 
-#include "unistd.h"
+#include <unistd.h>
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -17,7 +17,7 @@
 #include <rte_common.h>
 #include <rte_debug.h>
 #include <rte_ethdev.h>
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_log.h>
 #include <rte_lcore.h>
 #include <rte_memory.h>
@@ -47,8 +47,8 @@
 #define MBUF_CACHE_SIZE (250)
 #define BURST_SIZE (32)
 
-#define RTE_TEST_RX_DESC_MAX	(2048)
-#define RTE_TEST_TX_DESC_MAX	(2048)
+#define RX_DESC_MAX	(2048)
+#define TX_DESC_MAX	(2048)
 #define MAX_PKT_BURST			(512)
 #define DEF_PKT_BURST			(16)
 
@@ -134,12 +134,10 @@ static uint16_t vlan_id = 0x100;
 
 static struct rte_eth_conf default_pmd_conf = {
 	.rxmode = {
-		.mq_mode = ETH_MQ_RX_NONE,
-		.split_hdr_size = 0,
-		.max_rx_pkt_len = RTE_ETHER_MAX_LEN,
+		.mq_mode = RTE_ETH_MQ_RX_NONE,
 	},
 	.txmode = {
-		.mq_mode = ETH_MQ_TX_NONE,
+		.mq_mode = RTE_ETH_MQ_TX_NONE,
 	},
 	.lpbk_mode = 0,
 };
@@ -182,6 +180,10 @@ configure_ethdev(uint16_t port_id, uint8_t start, uint8_t en_isr)
 			test_params->nb_tx_q, &default_pmd_conf),
 			"rte_eth_dev_configure for port %d failed", port_id);
 
+	int ret = rte_eth_dev_set_mtu(port_id, 1550);
+	RTE_TEST_ASSERT(ret == 0 || ret == -ENOTSUP,
+			"rte_eth_dev_set_mtu for port %d failed", port_id);
+
 	for (q_id = 0; q_id < test_params->nb_rx_q; q_id++)
 		TEST_ASSERT_SUCCESS(rte_eth_rx_queue_setup(port_id, q_id, RX_RING_SIZE,
 				rte_eth_dev_socket_id(port_id), &rx_conf_default,
@@ -222,8 +224,8 @@ test_setup(void)
 				"Ethernet header struct allocation failed!");
 	}
 
-	nb_mbuf_per_pool = RTE_TEST_RX_DESC_MAX + DEF_PKT_BURST +
-			RTE_TEST_TX_DESC_MAX + MAX_PKT_BURST;
+	nb_mbuf_per_pool = RX_DESC_MAX + DEF_PKT_BURST +
+			TX_DESC_MAX + MAX_PKT_BURST;
 	if (test_params->mbuf_pool == NULL) {
 		test_params->mbuf_pool = rte_pktmbuf_pool_create("MBUF_POOL",
 			nb_mbuf_per_pool, MBUF_CACHE_SIZE, 0,
@@ -445,7 +447,8 @@ test_add_already_bonded_slave_to_bonded_device(void)
 	uint16_t slaves[RTE_MAX_ETHPORTS];
 	char pmd_name[RTE_ETH_NAME_MAX_LEN];
 
-	test_add_slave_to_bonded_device();
+	TEST_ASSERT_SUCCESS(test_add_slave_to_bonded_device(),
+			"Failed to add member to bonding device");
 
 	current_slave_count = rte_eth_bond_slaves_get(test_params->bonded_port_id,
 			slaves, RTE_MAX_ETHPORTS);
@@ -1640,8 +1643,7 @@ test_roundrobin_rx_burst_on_single_slave(void)
 
 	/* free mbufs */
 	for (i = 0; i < MAX_PKT_BURST; i++) {
-		if (rx_pkt_burst[i] != NULL)
-			rte_pktmbuf_free(rx_pkt_burst[i]);
+		rte_pktmbuf_free(rx_pkt_burst[i]);
 	}
 
 
@@ -1723,8 +1725,7 @@ test_roundrobin_rx_burst_on_multiple_slaves(void)
 
 	/* free mbufs */
 	for (i = 0; i < MAX_PKT_BURST; i++) {
-		if (rx_pkt_burst[i] != NULL)
-			rte_pktmbuf_free(rx_pkt_burst[i]);
+		rte_pktmbuf_free(rx_pkt_burst[i]);
 	}
 
 	/* Clean up and remove slaves from bonded device */
@@ -2011,8 +2012,7 @@ test_roundrobin_verify_slave_link_status_change_behaviour(void)
 
 	/* free mbufs */
 	for (i = 0; i < MAX_PKT_BURST; i++) {
-		if (rx_pkt_burst[i] != NULL)
-			rte_pktmbuf_free(rx_pkt_burst[i]);
+		rte_pktmbuf_free(rx_pkt_burst[i]);
 	}
 
 	/* Clean up and remove slaves from bonded device */
@@ -4262,7 +4262,7 @@ test_tlb_tx_burst(void)
 			burst_size);
 	TEST_ASSERT_EQUAL(nb_tx, 0, " bad number of packet in burst");
 
-	/* Clean ugit checkout masterp and remove slaves from bonded device */
+	/* Clean up and remove members from bonding device */
 	return remove_slaves_and_stop_bonded_device();
 }
 

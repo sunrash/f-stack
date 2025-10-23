@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include <sys/queue.h>
 
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_flow.h>
 #include <rte_spinlock.h>
 #include <rte_bitmap.h>
@@ -131,6 +131,9 @@ struct bond_dev_private {
 	uint32_t link_down_delay_ms;
 	uint32_t link_up_delay_ms;
 
+	uint32_t speed_capa;
+	/**< Supported speeds bitmap (RTE_ETH_LINK_SPEED_). */
+
 	uint16_t nb_rx_queues;			/**< Total number of rx queues */
 	uint16_t nb_tx_queues;			/**< Total number of tx queues*/
 
@@ -167,14 +170,16 @@ struct bond_dev_private {
 	struct rte_eth_desc_lim tx_desc_lim;	/**< Tx descriptor limits */
 
 	uint16_t reta_size;
-	struct rte_eth_rss_reta_entry64 reta_conf[ETH_RSS_RETA_SIZE_512 /
-			RTE_RETA_GROUP_SIZE];
+	struct rte_eth_rss_reta_entry64 reta_conf[RTE_ETH_RSS_RETA_SIZE_512 /
+			RTE_ETH_RETA_GROUP_SIZE];
 
 	uint8_t rss_key[52];				/**< 52-byte hash key buffer. */
 	uint8_t rss_key_len;				/**< hash key length in bytes. */
 
 	struct rte_kvargs *kvlist;
 	uint8_t slave_update_idx;
+
+	bool kvargs_processing_is_done;
 
 	uint32_t candidate_max_rx_pktlen;
 	uint32_t max_rx_pktlen;
@@ -244,6 +249,10 @@ bond_ethdev_mode_set(struct rte_eth_dev *eth_dev, uint8_t mode);
 
 int
 slave_configure(struct rte_eth_dev *bonded_eth_dev,
+		struct rte_eth_dev *slave_eth_dev);
+
+int
+slave_start(struct rte_eth_dev *bonded_eth_dev,
 		struct rte_eth_dev *slave_eth_dev);
 
 void

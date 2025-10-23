@@ -29,7 +29,7 @@ def get_memsize(arg):
     '''Convert memory size with suffix to kB'''
     match = re.match(r'(\d+)([' + BINARY_PREFIX + r']?)$', arg.upper())
     if match is None:
-        sys.exit('{} is not a valid page size'.format(arg))
+        sys.exit('{} is not a valid size'.format(arg))
     num = float(match.group(1))
     suffix = match.group(2)
     if suffix == "":
@@ -43,6 +43,13 @@ def is_numa():
     return os.path.exists('/sys/devices/system/node')
 
 
+def get_valid_page_sizes(path):
+    '''Extract valid hugepage sizes'''
+    dir = os.path.dirname(path)
+    pg_sizes = (d.split("-")[1] for d in os.listdir(dir))
+    return " ".join(pg_sizes)
+
+
 def get_hugepages(path):
     '''Read number of reserved pages'''
     with open(path + '/nr_hugepages') as nr_hugepages:
@@ -50,18 +57,21 @@ def get_hugepages(path):
     return 0
 
 
-def set_hugepages(path, pages):
+def set_hugepages(path, reqpages):
     '''Write the number of reserved huge pages'''
     filename = path + '/nr_hugepages'
     try:
         with open(filename, 'w') as nr_hugepages:
-            nr_hugepages.write('{}\n'.format(pages))
+            nr_hugepages.write('{}\n'.format(reqpages))
     except PermissionError:
         sys.exit('Permission denied: need to be root!')
     except FileNotFoundError:
-        filename = os.path.basename(path)
-        size = filename[10:]
-        sys.exit('{} is not a valid system huge page size'.format(size))
+        sys.exit("Invalid page size. Valid page sizes: {}".format(
+                 get_valid_page_sizes(path)))
+    gotpages = get_hugepages(path)
+    if gotpages != reqpages:
+        sys.exit('Unable to set pages ({} instead of {} in {}).'.format(
+                 gotpages, reqpages, filename))
 
 
 def show_numa_pages():
@@ -70,6 +80,8 @@ def show_numa_pages():
     for numa_path in glob.glob('/sys/devices/system/node/node*'):
         node = numa_path[29:]  # slice after /sys/devices/system/node/node
         path = numa_path + '/hugepages'
+        if not os.path.exists(path):
+            continue
         for hdir in os.listdir(path):
             pages = get_hugepages(path + '/' + hdir)
             if pages > 0:
@@ -158,7 +170,7 @@ def get_mountpoints():
     return mounted
 
 
-def mount_huge(pagesize, mountpoint):
+def mount_huge(pagesize, mountpoint, user, group):
     '''Mount the huge TLB file system'''
     if mountpoint in get_mountpoints():
         print(mountpoint, "already mounted")
@@ -166,6 +178,10 @@ def mount_huge(pagesize, mountpoint):
     cmd = "mount -t hugetlbfs"
     if pagesize:
         cmd += ' -o pagesize={}'.format(pagesize * 1024)
+    if user:
+        cmd += ' -o uid=' + user
+    if group:
+        cmd += ' -o gid=' + group
     cmd += ' nodev ' + mountpoint
     os.system(cmd)
 
@@ -217,6 +233,22 @@ To a complete setup of with 2 Gigabyte of 1G huge pages:
         action='store_true',
         help='unmount the system huge page directory')
     parser.add_argument(
+        '--directory',
+        '-d',
+        metavar='DIR',
+        default=HUGE_MOUNT,
+        help='mount point')
+    parser.add_argument(
+        '--user',
+        '-U',
+        metavar='UID',
+        help='set the mounted directory owner user')
+    parser.add_argument(
+        '--group',
+        '-G',
+        metavar='GID',
+        help='set the mounted directory owner group')
+    parser.add_argument(
         '--node', '-n', help='select numa node to reserve pages on')
     parser.add_argument(
         '--pagesize',
@@ -240,15 +272,20 @@ To a complete setup of with 2 Gigabyte of 1G huge pages:
         args.reserve = args.setup
         args.mount = True
 
+    if not (args.show or args.mount or args.unmount or args.clear or args.reserve):
+        parser.error("no action specified")
+
     if args.pagesize:
         pagesize_kb = get_memsize(args.pagesize)
     else:
         pagesize_kb = default_pagesize()
+    if not pagesize_kb:
+        sys.exit("Invalid page size: {}kB".format(pagesize_kb))
 
     if args.clear:
         clear_pages()
     if args.unmount:
-        umount_huge(HUGE_MOUNT)
+        umount_huge(args.directory)
 
     if args.reserve:
         reserve_kb = get_memsize(args.reserve)
@@ -259,7 +296,7 @@ To a complete setup of with 2 Gigabyte of 1G huge pages:
         reserve_pages(
             int(reserve_kb / pagesize_kb), pagesize_kb, node=args.node)
     if args.mount:
-        mount_huge(pagesize_kb, HUGE_MOUNT)
+        mount_huge(pagesize_kb, args.directory, args.user, args.group)
     if args.show:
         show_pages()
         print()

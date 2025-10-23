@@ -10,7 +10,6 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <inttypes.h>
-#include <netinet/in.h>
 #include <rte_byteorder.h>
 #include <rte_common.h>
 #include <rte_cycles.h>
@@ -25,10 +24,10 @@
 #include <rte_eal.h>
 #include <rte_alarm.h>
 #include <rte_ether.h>
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_malloc.h>
 #include <rte_random.h>
-#include <rte_dev.h>
+#include <dev_driver.h>
 #include <rte_hash_crc.h>
 #include <rte_flow.h>
 #include <rte_flow_driver.h>
@@ -37,6 +36,7 @@
 #include "base/ixgbe_api.h"
 #include "base/ixgbe_vf.h"
 #include "base/ixgbe_common.h"
+#include "base/ixgbe_osdep.h"
 #include "ixgbe_ethdev.h"
 #include "ixgbe_bypass.h"
 #include "ixgbe_rxtx.h"
@@ -1259,7 +1259,7 @@ cons_parse_l2_tn_filter(struct rte_eth_dev *dev,
 		return -rte_errno;
 	}
 
-	filter->l2_tunnel_type = RTE_L2_TUNNEL_TYPE_E_TAG;
+	filter->l2_tunnel_type = RTE_ETH_L2_TUNNEL_TYPE_E_TAG;
 	/**
 	 * grp and e_cid_base are bit fields and only use 14 bits.
 	 * e-tag id is taken as little endian by HW.
@@ -1918,9 +1918,9 @@ ixgbe_parse_fdir_filter_normal(struct rte_eth_dev *dev,
 
 		/* check src addr mask */
 		for (j = 0; j < 16; j++) {
-			if (ipv6_mask->hdr.src_addr[j] == UINT8_MAX) {
-				rule->mask.src_ipv6_mask |= 1 << j;
-			} else if (ipv6_mask->hdr.src_addr[j] != 0) {
+			if (ipv6_mask->hdr.src_addr[j] == 0) {
+				rule->mask.src_ipv6_mask &= ~(1 << j);
+			} else if (ipv6_mask->hdr.src_addr[j] != UINT8_MAX) {
 				memset(rule, 0, sizeof(struct ixgbe_fdir_rule));
 				rte_flow_error_set(error, EINVAL,
 					RTE_FLOW_ERROR_TYPE_ITEM,
@@ -1931,9 +1931,9 @@ ixgbe_parse_fdir_filter_normal(struct rte_eth_dev *dev,
 
 		/* check dst addr mask */
 		for (j = 0; j < 16; j++) {
-			if (ipv6_mask->hdr.dst_addr[j] == UINT8_MAX) {
-				rule->mask.dst_ipv6_mask |= 1 << j;
-			} else if (ipv6_mask->hdr.dst_addr[j] != 0) {
+			if (ipv6_mask->hdr.dst_addr[j] == 0) {
+				rule->mask.dst_ipv6_mask &= ~(1 << j);
+			} else if (ipv6_mask->hdr.dst_addr[j] != UINT8_MAX) {
 				memset(rule, 0, sizeof(struct ixgbe_fdir_rule));
 				rte_flow_error_set(error, EINVAL,
 					RTE_FLOW_ERROR_TYPE_ITEM,
@@ -2758,7 +2758,8 @@ ixgbe_parse_fdir_filter(struct rte_eth_dev *dev,
 {
 	int ret;
 	struct ixgbe_hw *hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
-	enum rte_fdir_mode fdir_mode = dev->data->dev_conf.fdir_conf.mode;
+	struct rte_eth_fdir_conf *fdir_conf = IXGBE_DEV_FDIR_CONF(dev);
+	fdir_conf->drop_queue = IXGBE_FDIR_DROP_QUEUE;
 
 	if (hw->mac.type != ixgbe_mac_82599EB &&
 		hw->mac.type != ixgbe_mac_X540 &&
@@ -2787,9 +2788,16 @@ step_next:
 		rule->ixgbe_fdir.formatted.dst_port != 0))
 		return -ENOTSUP;
 
-	if (fdir_mode == RTE_FDIR_MODE_NONE ||
-	    fdir_mode != rule->mode)
+	if (fdir_conf->mode == RTE_FDIR_MODE_NONE) {
+		fdir_conf->mode = rule->mode;
+		ret = ixgbe_fdir_configure(dev);
+		if (ret) {
+			fdir_conf->mode = RTE_FDIR_MODE_NONE;
+			return ret;
+		}
+	} else if (fdir_conf->mode != rule->mode) {
 		return -ENOTSUP;
+	}
 
 	if (rule->queue >= dev->data->nb_rx_queues)
 		return -ENOTSUP;
